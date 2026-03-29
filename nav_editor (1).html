@@ -1,0 +1,956 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Terminal D — Nav Node Editor</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@400;700;800&display=swap');
+
+  :root {
+    --bg: #0a0c10;
+    --surface: #111418;
+    --surface2: #181c22;
+    --border: #2a2f3a;
+    --accent: #00d4ff;
+    --accent2: #ff6b35;
+    --accent3: #7fff6b;
+    --text: #e8eaf0;
+    --muted: #6b7280;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 20px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  header h1 {
+    font-family: 'Syne', sans-serif;
+    font-weight: 800;
+    font-size: 15px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  header span.sub { font-size: 11px; color: var(--muted); letter-spacing: 0.05em; }
+  .header-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .stat {
+    font-size: 11px; color: var(--muted);
+    padding: 4px 10px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .stat span { color: var(--accent); font-weight: 700; }
+
+  .layout { display: flex; flex: 1; overflow: hidden; }
+
+  .sidebar {
+    width: 248px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    overflow-y: auto;
+  }
+  .sidebar-section { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .sidebar-section h2 {
+    font-family: 'Syne', sans-serif;
+    font-size: 10px; font-weight: 700;
+    letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 8px;
+  }
+
+  .mode-btn {
+    display: flex; align-items: center; gap: 8px;
+    width: 100%; padding: 7px 10px;
+    background: transparent; border: 1px solid var(--border);
+    border-radius: 5px; color: var(--text);
+    font-family: 'JetBrains Mono', monospace; font-size: 12px;
+    cursor: pointer; margin-bottom: 5px;
+    transition: all 0.15s; text-align: left;
+  }
+  .mode-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .mode-btn.active { background: rgba(0,212,255,0.08); border-color: var(--accent); color: var(--accent); }
+  .mode-btn.active .dot { background: var(--accent); }
+  .mode-btn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; transition: background 0.15s; }
+  .mode-btn .key {
+    margin-left: auto; font-size: 10px; color: var(--muted);
+    background: var(--surface2); padding: 1px 5px;
+    border-radius: 3px; border: 1px solid var(--border);
+  }
+  .mode-btn.mode-erase.active { background: rgba(255,60,60,0.08); border-color: #ff6060; color: #ff6060; }
+  .mode-btn.mode-erase.active .dot { background: #ff6060; }
+  .mode-btn.mode-lasso.active { background: rgba(255,107,53,0.08); border-color: var(--accent2); color: var(--accent2); }
+  .mode-btn.mode-lasso.active .dot { background: var(--accent2); }
+
+  .type-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+  .type-btn {
+    padding: 5px 6px; background: transparent;
+    border: 1px solid var(--border); border-radius: 4px;
+    color: var(--muted); font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; cursor: pointer; transition: all 0.15s; text-align: center;
+  }
+  .type-btn:hover { border-color: var(--accent); color: var(--text); }
+  .type-btn.active { border-color: var(--accent2); color: var(--accent2); background: rgba(255,107,53,0.08); }
+
+  .setting-row {
+    display: flex; align-items: center;
+    justify-content: space-between;
+    margin-bottom: 7px; font-size: 11px; color: var(--muted);
+  }
+  .setting-row label { color: var(--text); font-size: 11px; }
+  input[type=number] {
+    width: 55px; background: var(--surface2);
+    border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; padding: 3px 6px; text-align: right;
+  }
+  input[type=text] {
+    width: 100%; background: var(--surface2);
+    border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; padding: 5px 8px; margin-bottom: 6px;
+    outline: none; transition: border-color 0.15s;
+  }
+  input[type=text]:focus { border-color: var(--accent); }
+
+  .toggle { position: relative; width: 32px; height: 18px; flex-shrink: 0; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle .slider {
+    position: absolute; inset: 0;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 18px; cursor: pointer; transition: all 0.2s;
+  }
+  .toggle .slider:before {
+    content: ''; position: absolute;
+    width: 12px; height: 12px; left: 2px; top: 2px;
+    background: var(--muted); border-radius: 50%; transition: all 0.2s;
+  }
+  .toggle input:checked + .slider { background: rgba(0,212,255,0.15); border-color: var(--accent); }
+  .toggle input:checked + .slider:before { transform: translateX(14px); background: var(--accent); }
+
+  .autogrid-section { background: rgba(0,212,255,0.025); }
+  .autogrid-section h2 { color: var(--accent) !important; }
+
+  .node-detail { padding: 12px 14px; border-bottom: 1px solid var(--border); display: none; }
+  .node-detail.visible { display: block; }
+  .node-detail h2 { font-family: 'Syne', sans-serif; font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent2); margin-bottom: 8px; }
+  .node-meta { font-size: 10px; color: var(--muted); margin-bottom: 8px; line-height: 1.6; }
+  .node-meta span { color: var(--text); }
+
+  .action-btn {
+    width: 100%; padding: 7px; border-radius: 5px;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    font-weight: 600; cursor: pointer; border: 1px solid;
+    transition: all 0.15s; margin-bottom: 5px; letter-spacing: 0.04em;
+  }
+  .btn-danger { background: rgba(255,60,60,0.08); border-color: rgba(255,60,60,0.4); color: #ff6060; }
+  .btn-danger:hover { background: rgba(255,60,60,0.18); }
+  .btn-primary { background: rgba(0,212,255,0.08); border-color: var(--accent); color: var(--accent); }
+  .btn-primary:hover { background: rgba(0,212,255,0.18); }
+  .btn-success { background: rgba(127,255,107,0.08); border-color: var(--accent3); color: var(--accent3); }
+  .btn-success:hover { background: rgba(127,255,107,0.18); }
+  .btn-orange { background: rgba(255,107,53,0.08); border-color: var(--accent2); color: var(--accent2); }
+  .btn-orange:hover { background: rgba(255,107,53,0.18); }
+  .btn-accent { background: rgba(0,212,255,0.15); border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .btn-accent:hover { background: rgba(0,212,255,0.28); }
+
+  .canvas-wrap {
+    flex: 1; position: relative; overflow: hidden;
+    background: #060809;
+    background-image:
+      linear-gradient(rgba(0,212,255,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,212,255,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  canvas {
+    position: absolute; top: 0; left: 0;
+    cursor: crosshair;
+  }
+  canvas.mode-pan { cursor: grab; }
+  canvas.mode-pan.dragging { cursor: grabbing; }
+  canvas.mode-select { cursor: default; }
+  canvas.mode-delete { cursor: not-allowed; }
+  canvas.mode-erase { cursor: none; }
+  canvas.mode-lasso { cursor: crosshair; }
+
+  .bottombar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 16px; background: var(--surface);
+    border-top: 1px solid var(--border);
+    font-size: 10px; color: var(--muted); flex-shrink: 0;
+  }
+  .hint { margin-left: auto; font-size: 10px; color: var(--muted); opacity: 0.6; }
+
+  .modal-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.75); z-index: 100;
+    align-items: center; justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; width: 680px; max-height: 80vh;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+  }
+  .modal-header h3 {
+    font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 700;
+    color: var(--accent3); letter-spacing: 0.06em; text-transform: uppercase;
+  }
+  .modal-close { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; }
+  .modal-close:hover { color: var(--text); }
+  .modal-tabs { display: flex; border-bottom: 1px solid var(--border); }
+  .tab-btn {
+    padding: 8px 16px; background: none; border: none;
+    border-bottom: 2px solid transparent; color: var(--muted);
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .modal-body { flex: 1; overflow-y: auto; padding: 14px 18px; }
+  pre {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 5px; padding: 12px; font-size: 10px; line-height: 1.6;
+    color: var(--accent3); overflow-x: auto; white-space: pre;
+    max-height: 400px; overflow-y: auto;
+  }
+  .modal-footer {
+    padding: 10px 18px; border-top: 1px solid var(--border);
+    display: flex; gap: 8px; justify-content: flex-end;
+  }
+
+  .upload-zone {
+    border: 1.5px dashed var(--border); border-radius: 6px;
+    padding: 10px; text-align: center; font-size: 11px;
+    color: var(--muted); cursor: pointer; transition: all 0.15s; margin-bottom: 6px;
+  }
+  .upload-zone:hover { border-color: var(--accent); color: var(--accent); }
+  .upload-zone input { display: none; }
+
+  .zoom-badge {
+    position: absolute; bottom: 12px; right: 12px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 4px; padding: 4px 10px; font-size: 10px;
+    color: var(--muted); pointer-events: none;
+  }
+  .zoom-badge span { color: var(--accent); }
+
+  #brush-indicator {
+    position: absolute; pointer-events: none;
+    border: 1.5px solid rgba(255,80,80,0.8);
+    border-radius: 50%; display: none;
+    transform: translate(-50%, -50%);
+    background: rgba(255,60,60,0.07);
+  }
+
+  #lasso-box {
+    position: absolute; pointer-events: none;
+    border: 1.5px dashed var(--accent2);
+    background: rgba(255,107,53,0.06);
+    display: none;
+  }
+
+  .grid-note {
+    font-size: 10px; color: var(--muted);
+    margin-top: 6px; line-height: 1.5;
+  }
+  .grid-note .hi { color: var(--accent); }
+  .grid-note .ok { color: var(--accent3); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>NavEdit</h1>
+  <span class="sub">Terminal D &mdash; Node Graph Editor</span>
+  <div class="header-right">
+    <div class="stat" id="stat-nodes">Nodes: <span>0</span></div>
+    <div class="stat" id="stat-edges">Edges: <span>0</span></div>
+    <div class="stat">Zoom: <span id="zoom-val">100</span>%</div>
+  </div>
+</header>
+
+<div class="layout">
+  <div class="sidebar">
+
+    <!-- MAP -->
+    <div class="sidebar-section">
+      <h2>Map Image</h2>
+      <label class="upload-zone">
+        <input type="file" id="map-upload" accept="image/*">
+        <div>&#x1F5BC; Click to load PNG map</div>
+      </label>
+      <button class="action-btn btn-danger" id="clear-map-btn" style="display:none">Remove Map</button>
+    </div>
+
+    <!-- AUTO GRID -->
+    <div class="sidebar-section autogrid-section">
+      <h2>&#x25A6; Auto-Grid Stamp</h2>
+      <div class="setting-row">
+        <label>Spacing (px)</label>
+        <input type="number" id="grid-spacing" value="40" min="8" max="300">
+      </div>
+      <div class="setting-row">
+        <label>Offset X</label>
+        <input type="number" id="grid-offset-x" value="0" min="0" max="300">
+      </div>
+      <div class="setting-row">
+        <label>Offset Y</label>
+        <input type="number" id="grid-offset-y" value="0" min="0" max="300">
+      </div>
+      <button class="action-btn btn-accent" id="stamp-grid-btn">Stamp Full Map</button>
+      <button class="action-btn btn-orange" id="stamp-visible-btn">Stamp Visible Area</button>
+      <div class="grid-note" id="grid-note">Load map, set spacing, stamp grid. Then use <span class="hi">Lasso</span> or <span class="hi">Paint Erase</span> to remove unwanted nodes.</div>
+    </div>
+
+    <!-- MODES -->
+    <div class="sidebar-section">
+      <h2>Mode</h2>
+      <button class="mode-btn active" data-mode="place">
+        <span class="dot"></span> Place Node <span class="key">P</span>
+      </button>
+      <button class="mode-btn" data-mode="select">
+        <span class="dot"></span> Select / Move <span class="key">S</span>
+      </button>
+      <button class="mode-btn mode-lasso" data-mode="lasso">
+        <span class="dot"></span> Lasso Delete <span class="key">L</span>
+      </button>
+      <button class="mode-btn mode-erase" data-mode="erase">
+        <span class="dot"></span> Paint Erase <span class="key">E</span>
+      </button>
+      <button class="mode-btn" data-mode="pan">
+        <span class="dot"></span> Pan / Zoom <span class="key">V</span>
+      </button>
+      <button class="mode-btn" data-mode="delete">
+        <span class="dot"></span> Click Delete <span class="key">D</span>
+      </button>
+    </div>
+
+    <!-- ERASE BRUSH -->
+    <div class="sidebar-section" id="erase-settings" style="display:none">
+      <h2>Paint Erase Brush</h2>
+      <div class="setting-row">
+        <label>Brush radius</label>
+        <input type="number" id="erase-radius" value="30" min="5" max="300">
+      </div>
+    </div>
+
+    <!-- NODE TYPE -->
+    <div class="sidebar-section">
+      <h2>Node Type (placement)</h2>
+      <div class="type-grid" id="global-type-grid">
+        <button class="type-btn active" data-type="waypoint">waypoint</button>
+        <button class="type-btn" data-type="gate">gate</button>
+        <button class="type-btn" data-type="amenity">amenity</button>
+        <button class="type-btn" data-type="elevator">elevator</button>
+        <button class="type-btn" data-type="escalator">escalator</button>
+        <button class="type-btn" data-type="exit">exit</button>
+      </div>
+    </div>
+
+    <!-- EDGE SETTINGS -->
+    <div class="sidebar-section">
+      <h2>Edge Generation</h2>
+      <div class="setting-row">
+        <label>Connect radius</label>
+        <input type="number" id="edge-radius" value="60" min="10" max="600">
+      </div>
+      <div class="setting-row">
+        <label>8-dir snap</label>
+        <label class="toggle"><input type="checkbox" id="snap-8dir" checked><span class="slider"></span></label>
+      </div>
+      <div class="setting-row">
+        <label>Show edges</label>
+        <label class="toggle"><input type="checkbox" id="show-edges" checked><span class="slider"></span></label>
+      </div>
+      <div class="setting-row">
+        <label>Show labels</label>
+        <label class="toggle"><input type="checkbox" id="show-labels" checked><span class="slider"></span></label>
+      </div>
+    </div>
+
+    <!-- SELECTED NODE -->
+    <div class="node-detail" id="node-detail">
+      <h2>&#x25A3; Selected Node</h2>
+      <div class="node-meta" id="node-meta"></div>
+      <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Label</label>
+      <input type="text" id="node-label-input" placeholder="Gate D14, Restroom, etc.">
+      <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Type</label>
+      <div class="type-grid" id="node-type-select" style="margin-bottom:8px">
+        <button class="type-btn" data-type="waypoint">waypoint</button>
+        <button class="type-btn" data-type="gate">gate</button>
+        <button class="type-btn" data-type="amenity">amenity</button>
+        <button class="type-btn" data-type="elevator">elevator</button>
+        <button class="type-btn" data-type="escalator">escalator</button>
+        <button class="type-btn" data-type="exit">exit</button>
+      </div>
+      <button class="action-btn btn-danger" id="delete-selected-btn">Delete Selected</button>
+    </div>
+
+    <!-- ACTIONS -->
+    <div class="sidebar-section">
+      <h2>Actions</h2>
+      <button class="action-btn btn-primary" id="regen-edges-btn">Regenerate Edges</button>
+      <button class="action-btn btn-success" id="export-btn">Export SQL / JSON</button>
+      <button class="action-btn btn-orange" id="import-btn">Import JSON</button>
+      <button class="action-btn btn-danger" id="clear-all-btn">Clear All Nodes</button>
+    </div>
+
+    <!-- LEGEND -->
+    <div class="sidebar-section">
+      <h2>Legend</h2>
+      <div style="font-size:10px;line-height:2;color:var(--muted)">
+        <div><span style="color:var(--accent)">&#11044;</span> waypoint</div>
+        <div><span style="color:#a78bfa">&#11044;</span> gate</div>
+        <div><span style="color:var(--accent3)">&#11044;</span> amenity</div>
+        <div><span style="color:#fbbf24">&#11044;</span> elevator / escalator</div>
+        <div><span style="color:var(--accent2)">&#11044;</span> exit / selected</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- CANVAS -->
+  <div class="canvas-wrap" id="canvas-wrap">
+    <canvas id="main-canvas"></canvas>
+    <div id="brush-indicator"></div>
+    <div id="lasso-box"></div>
+    <div class="zoom-badge">Zoom: <span id="zoom-display">100</span>%</div>
+  </div>
+</div>
+
+<div class="bottombar">
+  <div>x: <span id="coord-x" style="color:var(--accent)">0</span> &nbsp; y: <span id="coord-y" style="color:var(--accent)">0</span></div>
+  <div id="mode-hint" style="color:var(--muted);font-size:10px;margin-left:14px;opacity:0.8"></div>
+  <div class="hint">Scroll=zoom &nbsp;|&nbsp; Alt+drag / middle-click=pan &nbsp;|&nbsp; Del=delete selected</div>
+</div>
+
+<!-- EXPORT MODAL -->
+<div class="modal-overlay" id="export-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Export Graph Data</h3>
+      <button class="modal-close" id="modal-close-btn">&times;</button>
+    </div>
+    <div class="modal-tabs">
+      <button class="tab-btn active" data-tab="sql-nodes">SQL: nodes</button>
+      <button class="tab-btn" data-tab="sql-edges">SQL: edges</button>
+      <button class="tab-btn" data-tab="json">JSON</button>
+      <button class="tab-btn" data-tab="pgrouting">pgRouting</button>
+    </div>
+    <div class="modal-body"><pre id="export-content"></pre></div>
+    <div class="modal-footer">
+      <button class="action-btn btn-primary" id="copy-btn" style="width:auto;padding:6px 18px">Copy</button>
+      <button class="action-btn btn-success" id="download-btn" style="width:auto;padding:6px 18px">Download</button>
+    </div>
+  </div>
+</div>
+
+<!-- IMPORT MODAL -->
+<div class="modal-overlay" id="import-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Import JSON</h3>
+      <button class="modal-close" id="import-close-btn">&times;</button>
+    </div>
+    <div class="modal-body">
+      <textarea id="import-textarea" style="width:100%;height:300px;background:var(--surface2);border:1px solid var(--border);border-radius:5px;color:var(--accent3);font-family:'JetBrains Mono',monospace;font-size:11px;padding:12px;resize:none;outline:none"></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="action-btn btn-primary" id="import-confirm-btn" style="width:auto;padding:6px 18px">Import</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// =========================================================
+// STATE
+// =========================================================
+const S = {
+  nodes: [], edges: [],
+  nextId: 1,
+  mode: 'place',
+  nodeType: 'waypoint',
+  selectedIds: new Set(),
+  dragging: null,
+  panOffset: { x: 0, y: 0 },
+  zoom: 1,
+  mapImage: null,
+  edgeRadius: 60,
+  showEdges: true,
+  showLabels: true,
+  snap8dir: true,
+  eraseRadius: 30,
+  lasso: null,
+  erasing: false,
+  msx: 0, msy: 0,
+};
+
+// =========================================================
+// CANVAS
+// =========================================================
+const wrap = document.getElementById('canvas-wrap');
+const canvas = document.getElementById('main-canvas');
+const ctx = canvas.getContext('2d');
+const brushEl = document.getElementById('brush-indicator');
+const lassoEl = document.getElementById('lasso-box');
+
+function resize() { canvas.width = wrap.clientWidth; canvas.height = wrap.clientHeight; render(); }
+window.addEventListener('resize', resize);
+resize();
+
+function s2w(sx, sy) { return { x: (sx - S.panOffset.x) / S.zoom, y: (sy - S.panOffset.y) / S.zoom }; }
+function w2s(wx, wy) { return { x: wx * S.zoom + S.panOffset.x, y: wy * S.zoom + S.panOffset.y }; }
+
+// =========================================================
+// EDGES
+// =========================================================
+const DIRS8 = [
+  {dx:0,dy:-1},{dx:1,dy:-1},{dx:1,dy:0},{dx:1,dy:1},
+  {dx:0,dy:1},{dx:-1,dy:1},{dx:-1,dy:0},{dx:-1,dy:-1},
+];
+function adiff(a,b){let d=Math.abs(a-b)%360;return d>180?360-d:d;}
+function getDir(dx,dy){
+  const a=(Math.atan2(dy,dx)*180/Math.PI+360)%360;
+  return ['E','NE','N','NW','W','SW','S','SE'][Math.round(a/45)%8];
+}
+function genEdges() {
+  S.edges=[];
+  const r=S.edgeRadius, ns=S.nodes;
+  for(let i=0;i<ns.length;i++) for(let j=i+1;j<ns.length;j++){
+    const a=ns[i],b=ns[j],dx=b.x-a.x,dy=b.y-a.y,d=Math.sqrt(dx*dx+dy*dy);
+    if(d>r) continue;
+    if(S.snap8dir){
+      const ang=(Math.atan2(dy,dx)*180/Math.PI+360)%360;
+      const ok=DIRS8.some(dir=>adiff(ang,(Math.atan2(dir.dy,dir.dx)*180/Math.PI+360)%360)<=22);
+      if(!ok) continue;
+    }
+    S.edges.push({from:a.id,to:b.id,distance:Math.round(d*10)/10,direction:getDir(dx,dy)});
+  }
+  updStats();
+}
+
+// =========================================================
+// RENDER
+// =========================================================
+const TCOLORS={waypoint:'#00d4ff',gate:'#a78bfa',amenity:'#7fff6b',elevator:'#fbbf24',escalator:'#fbbf24',exit:'#ff6b35'};
+function nc(t){return TCOLORS[t]||'#00d4ff';}
+
+function render(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.save();
+  ctx.translate(S.panOffset.x,S.panOffset.y);
+  ctx.scale(S.zoom,S.zoom);
+
+  if(S.mapImage){ctx.globalAlpha=0.85;ctx.drawImage(S.mapImage,0,0);ctx.globalAlpha=1;}
+
+  if(S.showEdges){
+    ctx.lineWidth=1.5/S.zoom;
+    for(const e of S.edges){
+      const a=S.nodes.find(n=>n.id===e.from),b=S.nodes.find(n=>n.id===e.to);
+      if(!a||!b) continue;
+      ctx.strokeStyle=(S.selectedIds.has(a.id)||S.selectedIds.has(b.id))?'rgba(255,107,53,0.65)':'rgba(0,212,255,0.28)';
+      ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+    }
+  }
+
+  const r=5/S.zoom;
+  for(const n of S.nodes){
+    const sel=S.selectedIds.has(n.id),col=sel?'#ff6b35':nc(n.type);
+    ctx.shadowColor=col;ctx.shadowBlur=(sel?10:5)/S.zoom;
+    ctx.beginPath();ctx.arc(n.x,n.y,r,0,Math.PI*2);
+    ctx.fillStyle=col;ctx.fill();ctx.shadowBlur=0;
+    ctx.beginPath();ctx.arc(n.x,n.y,r+2/S.zoom,0,Math.PI*2);
+    ctx.strokeStyle=sel?'rgba(255,107,53,0.5)':'rgba(255,255,255,0.12)';
+    ctx.lineWidth=1/S.zoom;ctx.stroke();
+    if(S.showLabels&&n.label){
+      ctx.font=`${10/S.zoom}px JetBrains Mono,monospace`;
+      ctx.fillStyle='rgba(232,234,240,0.9)';
+      ctx.shadowColor='rgba(0,0,0,0.9)';ctx.shadowBlur=3/S.zoom;
+      ctx.fillText(n.label,n.x+r+3/S.zoom,n.y+4/S.zoom);ctx.shadowBlur=0;
+    }
+  }
+  ctx.restore();
+}
+
+function updStats(){
+  document.querySelector('#stat-nodes span').textContent=S.nodes.length;
+  document.querySelector('#stat-edges span').textContent=S.edges.length;
+  document.getElementById('zoom-display').textContent=Math.round(S.zoom*100);
+  document.getElementById('zoom-val').textContent=Math.round(S.zoom*100);
+}
+
+// =========================================================
+// HIT TEST
+// =========================================================
+function nodeAt(sx,sy){
+  const w=s2w(sx,sy),hr=10/S.zoom;
+  for(let i=S.nodes.length-1;i>=0;i--){
+    const n=S.nodes[i],dx=n.x-w.x,dy=n.y-w.y;
+    if(Math.sqrt(dx*dx+dy*dy)<hr) return n;
+  }
+  return null;
+}
+
+// =========================================================
+// AUTO GRID
+// =========================================================
+function stampGrid(visibleOnly){
+  const spacing=parseInt(document.getElementById('grid-spacing').value)||40;
+  const offX=parseInt(document.getElementById('grid-offset-x').value)||0;
+  const offY=parseInt(document.getElementById('grid-offset-y').value)||0;
+
+  let x0,y0,x1,y1;
+  if(visibleOnly||!S.mapImage){
+    const tl=s2w(0,0),br=s2w(canvas.width,canvas.height);
+    x0=tl.x;y0=tl.y;x1=br.x;y1=br.y;
+  } else {
+    x0=0;y0=0;x1=S.mapImage.width;y1=S.mapImage.height;
+  }
+
+  const startX=Math.ceil((x0-offX)/spacing)*spacing+offX;
+  const startY=Math.ceil((y0-offY)/spacing)*spacing+offY;
+  let added=0;
+
+  for(let gx=startX;gx<=x1;gx+=spacing){
+    for(let gy=startY;gy<=y1;gy+=spacing){
+      const rx=Math.round(gx),ry=Math.round(gy);
+      const tooClose=S.nodes.some(n=>{const dx=n.x-rx,dy=n.y-ry;return Math.sqrt(dx*dx+dy*dy)<spacing*0.55;});
+      if(!tooClose){S.nodes.push({id:S.nextId++,x:rx,y:ry,label:'',type:'waypoint'});added++;}
+    }
+  }
+
+  const note=document.getElementById('grid-note');
+  note.innerHTML=`<span class="ok">+${added} nodes stamped.</span> Now use <span class="hi">Lasso Delete</span> (L) to box-select walls, or <span class="hi">Paint Erase</span> (E) to brush them away.`;
+  genEdges();render();
+}
+
+document.getElementById('stamp-grid-btn').addEventListener('click',()=>stampGrid(false));
+document.getElementById('stamp-visible-btn').addEventListener('click',()=>stampGrid(true));
+
+// =========================================================
+// PAINT ERASE
+// =========================================================
+function eraseAt(sx,sy){
+  const w=s2w(sx,sy),r=S.eraseRadius/S.zoom;
+  const before=S.nodes.length;
+  S.nodes=S.nodes.filter(n=>{const dx=n.x-w.x,dy=n.y-w.y;return Math.sqrt(dx*dx+dy*dy)>r;});
+  if(S.nodes.length!==before){genEdges();render();}
+}
+function updateBrush(sx,sy){
+  if(S.mode!=='erase'){brushEl.style.display='none';return;}
+  const sr=S.eraseRadius;
+  brushEl.style.display='block';
+  brushEl.style.left=sx+'px';brushEl.style.top=sy+'px';
+  brushEl.style.width=(sr*2)+'px';brushEl.style.height=(sr*2)+'px';
+}
+
+// =========================================================
+// LASSO
+// =========================================================
+function updateLassoEl(){
+  const l=S.lasso;
+  if(!l||!l.active){lassoEl.style.display='none';return;}
+  const s1=w2s(l.x1,l.y1),s2=w2s(l.x2,l.y2);
+  const x=Math.min(s1.x,s2.x),y=Math.min(s1.y,s2.y);
+  lassoEl.style.display='block';
+  lassoEl.style.left=x+'px';lassoEl.style.top=y+'px';
+  lassoEl.style.width=Math.abs(s2.x-s1.x)+'px';lassoEl.style.height=Math.abs(s2.y-s1.y)+'px';
+}
+function commitLasso(){
+  const l=S.lasso;if(!l)return;
+  const mnX=Math.min(l.x1,l.x2),mxX=Math.max(l.x1,l.x2);
+  const mnY=Math.min(l.y1,l.y2),mxY=Math.max(l.y1,l.y2);
+  const before=S.nodes.length;
+  S.nodes=S.nodes.filter(n=>n.x<mnX||n.x>mxX||n.y<mnY||n.y>mxY);
+  S.selectedIds.clear();
+  if(S.nodes.length!==before){genEdges();render();}
+  S.lasso=null;lassoEl.style.display='none';
+}
+
+// =========================================================
+// PAN
+// =========================================================
+let isPan=false,panA={};
+
+// =========================================================
+// MOUSE
+// =========================================================
+canvas.addEventListener('mousemove',e=>{
+  const r=canvas.getBoundingClientRect(),sx=e.clientX-r.left,sy=e.clientY-r.top;
+  S.msx=sx;S.msy=sy;
+  const w=s2w(sx,sy);
+  document.getElementById('coord-x').textContent=Math.round(w.x);
+  document.getElementById('coord-y').textContent=Math.round(w.y);
+  updateBrush(sx,sy);
+
+  if(isPan){
+    S.panOffset.x=panA.ox+(e.clientX-panA.sx);
+    S.panOffset.y=panA.oy+(e.clientY-panA.sy);
+    render();return;
+  }
+  if(S.mode==='erase'&&S.erasing){eraseAt(sx,sy);return;}
+  if(S.mode==='lasso'&&S.lasso&&S.lasso.active){
+    const ww=s2w(sx,sy);S.lasso.x2=ww.x;S.lasso.y2=ww.y;updateLassoEl();return;
+  }
+  if(S.dragging){
+    const ww=s2w(sx,sy);S.dragging.node.x=ww.x+S.dragging.ox;S.dragging.node.y=ww.y+S.dragging.oy;
+    genEdges();render();
+  }
+});
+
+canvas.addEventListener('mousedown',e=>{
+  const r=canvas.getBoundingClientRect(),sx=e.clientX-r.left,sy=e.clientY-r.top;
+  if(e.button===1||(e.button===0&&S.mode==='pan')||(e.button===0&&e.altKey)){
+    isPan=true;panA={ox:S.panOffset.x,oy:S.panOffset.y,sx:e.clientX,sy:e.clientY};
+    canvas.classList.add('dragging');return;
+  }
+  if(e.button!==0) return;
+  const ww=s2w(sx,sy);
+
+  if(S.mode==='erase'){S.erasing=true;eraseAt(sx,sy);return;}
+  if(S.mode==='lasso'){S.lasso={x1:ww.x,y1:ww.y,x2:ww.x,y2:ww.y,active:true};updateLassoEl();return;}
+
+  const hit=nodeAt(sx,sy);
+  if(S.mode==='place'){
+    if(hit) return;
+    const node={id:S.nextId++,x:Math.round(ww.x),y:Math.round(ww.y),label:'',type:S.nodeType};
+    S.nodes.push(node);S.selectedIds.clear();S.selectedIds.add(node.id);
+    genEdges();render();showDetail(node);
+  } else if(S.mode==='select'){
+    if(hit){
+      if(e.shiftKey){if(S.selectedIds.has(hit.id))S.selectedIds.delete(hit.id);else S.selectedIds.add(hit.id);}
+      else{S.selectedIds.clear();S.selectedIds.add(hit.id);S.dragging={node:hit,ox:hit.x-ww.x,oy:hit.y-ww.y};}
+      showDetail(S.selectedIds.size===1?hit:null);render();
+    } else {S.selectedIds.clear();hideDetail();render();}
+  } else if(S.mode==='delete'){
+    if(hit){S.nodes=S.nodes.filter(n=>n.id!==hit.id);S.selectedIds.delete(hit.id);genEdges();hideDetail();render();}
+  }
+});
+
+canvas.addEventListener('mouseup',()=>{
+  if(isPan){isPan=false;canvas.classList.remove('dragging');}
+  if(S.erasing) S.erasing=false;
+  if(S.mode==='lasso'&&S.lasso&&S.lasso.active){S.lasso.active=false;commitLasso();}
+  if(S.dragging){S.dragging=null;genEdges();render();}
+});
+
+canvas.addEventListener('mouseleave',()=>{
+  isPan=false;S.erasing=false;canvas.classList.remove('dragging');brushEl.style.display='none';
+  if(S.mode==='lasso'&&S.lasso&&S.lasso.active){S.lasso.active=false;commitLasso();}
+});
+
+canvas.addEventListener('wheel',e=>{
+  e.preventDefault();
+  const r=canvas.getBoundingClientRect(),sx=e.clientX-r.left,sy=e.clientY-r.top;
+  const f=e.deltaY<0?1.1:0.9,nz=Math.min(10,Math.max(0.05,S.zoom*f));
+  S.panOffset.x=sx-(sx-S.panOffset.x)*(nz/S.zoom);
+  S.panOffset.y=sy-(sy-S.panOffset.y)*(nz/S.zoom);
+  S.zoom=nz;updStats();render();updateBrush(S.msx,S.msy);
+},{passive:false});
+
+// =========================================================
+// KEYBOARD
+// =========================================================
+const KMAP={p:'place',s:'select',v:'pan',d:'delete',e:'erase',l:'lasso'};
+document.addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA') return;
+  const k=e.key.toLowerCase();
+  if(KMAP[k]){setMode(KMAP[k]);return;}
+  if(e.key==='Delete'||e.key==='Backspace'){
+    S.nodes=S.nodes.filter(n=>!S.selectedIds.has(n.id));
+    S.selectedIds.clear();genEdges();hideDetail();render();
+  }
+  if(e.key==='Escape'){S.selectedIds.clear();hideDetail();render();}
+});
+
+// =========================================================
+// MODE
+// =========================================================
+const HINTS={
+  place:'Click to place node',
+  select:'Click to select & drag | Shift+click multi-select | Del to delete',
+  lasso:'Drag a rectangle — all nodes inside are deleted on mouse release',
+  erase:'Hold and drag to brush-erase nodes under the circle',
+  pan:'Drag to pan | also: Alt+drag or middle-click from any mode',
+  delete:'Click a node to delete it',
+};
+function setMode(m){
+  S.mode=m;
+  document.querySelectorAll('.mode-btn').forEach(b=>b.classList.toggle('active',b.dataset.mode===m));
+  const cmap={pan:'mode-pan',select:'mode-select',delete:'mode-delete',erase:'mode-erase',lasso:'mode-lasso'};
+  canvas.className=cmap[m]||'';
+  document.getElementById('erase-settings').style.display=m==='erase'?'block':'none';
+  document.getElementById('mode-hint').textContent=HINTS[m]||'';
+  if(m!=='erase') brushEl.style.display='none';
+}
+document.querySelectorAll('.mode-btn').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
+
+// =========================================================
+// NODE TYPE
+// =========================================================
+document.querySelectorAll('#global-type-grid .type-btn').forEach(b=>{
+  b.addEventListener('click',()=>{
+    document.querySelectorAll('#global-type-grid .type-btn').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');S.nodeType=b.dataset.type;
+  });
+});
+
+// =========================================================
+// DETAIL PANEL
+// =========================================================
+function showDetail(node){
+  const p=document.getElementById('node-detail');
+  if(!node){hideDetail();return;}
+  p.classList.add('visible');
+  document.getElementById('node-meta').innerHTML=`id: <span>${node.id}</span><br>x: <span>${Math.round(node.x)}</span>, y: <span>${Math.round(node.y)}</span><br>type: <span>${node.type}</span>`;
+  document.getElementById('node-label-input').value=node.label||'';
+  document.querySelectorAll('#node-type-select .type-btn').forEach(b=>b.classList.toggle('active',b.dataset.type===node.type));
+}
+function hideDetail(){document.getElementById('node-detail').classList.remove('visible');}
+
+document.getElementById('node-label-input').addEventListener('input',e=>{
+  if(S.selectedIds.size!==1) return;
+  const node=S.nodes.find(n=>n.id===[...S.selectedIds][0]);
+  if(node){node.label=e.target.value;render();}
+});
+document.querySelectorAll('#node-type-select .type-btn').forEach(b=>{
+  b.addEventListener('click',()=>{
+    if(S.selectedIds.size!==1) return;
+    const node=S.nodes.find(n=>n.id===[...S.selectedIds][0]);
+    if(!node) return;
+    node.type=b.dataset.type;
+    document.querySelectorAll('#node-type-select .type-btn').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');showDetail(node);render();
+  });
+});
+document.getElementById('delete-selected-btn').addEventListener('click',()=>{
+  S.nodes=S.nodes.filter(n=>!S.selectedIds.has(n.id));
+  S.selectedIds.clear();genEdges();hideDetail();render();
+});
+
+// =========================================================
+// SETTINGS
+// =========================================================
+document.getElementById('edge-radius').addEventListener('input',e=>{S.edgeRadius=parseInt(e.target.value)||60;genEdges();render();});
+document.getElementById('snap-8dir').addEventListener('change',e=>{S.snap8dir=e.target.checked;genEdges();render();});
+document.getElementById('show-edges').addEventListener('change',e=>{S.showEdges=e.target.checked;render();});
+document.getElementById('show-labels').addEventListener('change',e=>{S.showLabels=e.target.checked;render();});
+document.getElementById('erase-radius').addEventListener('input',e=>{S.eraseRadius=parseInt(e.target.value)||30;});
+document.getElementById('regen-edges-btn').addEventListener('click',()=>{genEdges();render();});
+document.getElementById('clear-all-btn').addEventListener('click',()=>{
+  if(!confirm('Clear all nodes and edges?')) return;
+  S.nodes=[];S.edges=[];S.selectedIds.clear();S.nextId=1;hideDetail();updStats();render();
+});
+
+// =========================================================
+// MAP
+// =========================================================
+document.getElementById('map-upload').addEventListener('change',e=>{
+  const f=e.target.files[0];if(!f) return;
+  const img=new Image();
+  img.onload=()=>{
+    S.mapImage=img;
+    const sx=canvas.width/img.width,sy=canvas.height/img.height;
+    S.zoom=Math.min(sx,sy)*0.95;
+    S.panOffset.x=(canvas.width-img.width*S.zoom)/2;
+    S.panOffset.y=(canvas.height-img.height*S.zoom)/2;
+    updStats();render();
+    document.getElementById('clear-map-btn').style.display='block';
+  };
+  img.src=URL.createObjectURL(f);
+});
+document.getElementById('clear-map-btn').addEventListener('click',()=>{S.mapImage=null;document.getElementById('clear-map-btn').style.display='none';render();});
+
+// =========================================================
+// EXPORT
+// =========================================================
+let curTab='sql-nodes',curContent='';
+function buildExports(){
+  const ns=S.nodes,es=S.edges;
+  const sqlN=`-- nav_nodes INSERT\n-- Prerequisite: CREATE TABLE nav_nodes (id SERIAL PRIMARY KEY, label TEXT, x FLOAT, y FLOAT, node_type TEXT);\n\nINSERT INTO nav_nodes (id, label, x, y, node_type) VALUES\n`
+    +ns.map(n=>`  (${n.id}, ${n.label?`'${n.label.replace(/'/g,"''")}'`:'NULL'}, ${Math.round(n.x)}, ${Math.round(n.y)}, '${n.type}')`).join(',\n')
+    +';\n\nSELECT setval(\'nav_nodes_id_seq\', (SELECT MAX(id) FROM nav_nodes));';
+  const sqlE=`-- nav_edges INSERT\n-- Prerequisite: CREATE TABLE nav_edges (id SERIAL PRIMARY KEY, from_node INT REFERENCES nav_nodes(id), to_node INT REFERENCES nav_nodes(id), distance FLOAT, direction TEXT);\n\nINSERT INTO nav_edges (from_node, to_node, distance, direction) VALUES\n`
+    +es.map(e=>`  (${e.from}, ${e.to}, ${e.distance}, '${e.direction}')`).join(',\n')+';';
+  const json=JSON.stringify({nodes:ns,edges:es},null,2);
+  const lastId=ns.length>1?ns[ns.length-1].id:'N';
+  const pgr=`-- pgRouting setup + example Dijkstra query\n-- Requires: CREATE EXTENSION pgrouting;\n\nCREATE OR REPLACE VIEW nav_edges_pgr AS\nSELECT\n  id,\n  from_node AS source,\n  to_node   AS target,\n  distance  AS cost,\n  distance  AS reverse_cost\nFROM nav_edges;\n\n-- Find shortest path from node 1 to node ${lastId}\nSELECT\n  r.seq,\n  r.node,\n  r.edge,\n  r.cost,\n  n.label,\n  n.x,\n  n.y,\n  n.node_type\nFROM pgr_dijkstra(\n  'SELECT id, source, target, cost, reverse_cost FROM nav_edges_pgr',\n  1, ${lastId},\n  directed => false\n) AS r\nJOIN nav_nodes n ON r.node = n.id\nORDER BY r.seq;`;
+  return {'sql-nodes':sqlN,'sql-edges':sqlE,'json':json,'pgrouting':pgr};
+}
+
+document.getElementById('export-btn').addEventListener('click',()=>{
+  curTab='sql-nodes';
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active',b.dataset.tab==='sql-nodes'));
+  curContent=buildExports()['sql-nodes'];
+  document.getElementById('export-content').textContent=curContent;
+  document.getElementById('export-modal').classList.add('open');
+});
+document.querySelectorAll('.tab-btn').forEach(b=>{
+  b.addEventListener('click',()=>{
+    curTab=b.dataset.tab;
+    document.querySelectorAll('.tab-btn').forEach(x=>x.classList.toggle('active',x===b));
+    curContent=buildExports()[curTab];
+    document.getElementById('export-content').textContent=curContent;
+  });
+});
+document.getElementById('modal-close-btn').addEventListener('click',()=>document.getElementById('export-modal').classList.remove('open'));
+document.getElementById('copy-btn').addEventListener('click',()=>{
+  navigator.clipboard.writeText(curContent).then(()=>{
+    const b=document.getElementById('copy-btn');b.textContent='Copied!';
+    setTimeout(()=>b.textContent='Copy',1500);
+  });
+});
+document.getElementById('download-btn').addEventListener('click',()=>{
+  const ext=curTab==='json'?'json':'sql';
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([curContent],{type:'text/plain'}));
+  a.download=`terminal_d_${curTab}.${ext}`;a.click();
+});
+
+// =========================================================
+// IMPORT
+// =========================================================
+document.getElementById('import-btn').addEventListener('click',()=>document.getElementById('import-modal').classList.add('open'));
+document.getElementById('import-close-btn').addEventListener('click',()=>document.getElementById('import-modal').classList.remove('open'));
+document.getElementById('import-confirm-btn').addEventListener('click',()=>{
+  try{
+    const d=JSON.parse(document.getElementById('import-textarea').value);
+    if(d.nodes){S.nodes=d.nodes;S.nextId=Math.max(...S.nodes.map(n=>n.id),0)+1;}
+    if(d.edges) S.edges=d.edges; else genEdges();
+    S.selectedIds.clear();hideDetail();updStats();render();
+    document.getElementById('import-modal').classList.remove('open');
+  }catch(err){alert('Invalid JSON: '+err.message);}
+});
+
+// =========================================================
+// INIT
+// =========================================================
+setMode('place');
+updStats();
+render();
+</script>
+</body>
+</html>
