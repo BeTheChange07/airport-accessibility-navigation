@@ -1,7 +1,7 @@
 #main only communicates with coordinator
 #main handles session management and everything async, passes sessions to coordinator
 
-import mapping, database, main
+import Backend.mapping.mapping as mapping, database, main
 
 INFRASTRUCTURE_TABLE_NAME = "infrastructure"
 NAVMESH_NODE_TABLE_NAME = "navmeshNodes"

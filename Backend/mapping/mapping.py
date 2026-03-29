@@ -1,12 +1,31 @@
 from typing import Any #Why is this needed but not import dict
 
 from main import getSession
+from NearestNodeFinder import NearestNodeFinder
+
+#GPS to node global vars
+NearestNodeFinderInstance = None
+nearestNodeIndexToNodeID: dict[int, int] = {} #Not going to assume nodeIDs are 0 to N-1, so need mapping from index in NearestNodeFinder's points array
+
+#Node to node global vars
+navigationGraph = None
+amenities = None
+infrastructure = None
 
 #Initial setup methods
 
 def populateNavmeshNodes(nodes: list[dict[str, Any]]): #Passed as json TODO
     # Make sure to also populate infrastructure dictionary and structure (quadtree? kt-tree?) for finding nearest node to a coordinate
+    
+    
+    
+    #Once you have the points as numpy arrays rather than json:
+    #global NearestNodeFinderInstance
+    #NearestNodeFinderInstance = NearestNodeFinder(coordinates)
+    #NearestNodeFinderInstance.set_active_mask(activeMask)
     pass
+
+
 
 def populateNavmeshEdges(edges: list[dict[str, Any]]): #Passed as json TODO
     pass
