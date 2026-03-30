@@ -2,10 +2,7 @@ from fastapi import FastAPI, Request, Response
 from contextlib import asynccontextmanager
 import time, json, asyncio
 
-import coordinator
-
-SESSION_TIMEOUT = 30 #seconds
-SESSION_CLEANUP_INTERVAL = 10 #seconds
+import coordinator, env
 
 class Session:
     def __init__(self, session_id: str):
@@ -31,10 +28,10 @@ def getSession(session_id: str) -> Session:
 async def cleanup_sessions():
     while True:
         now = time.time()
-        expired_sessions = [sid for sid, session in sessions.items() if now - session.last_active > SESSION_TIMEOUT]
+        expired_sessions = [sid for sid, session in sessions.items() if now - session.last_active > env.SESSION_TIMEOUT]
         for sid in expired_sessions:
             del sessions[sid]
-        await asyncio.sleep(SESSION_CLEANUP_INTERVAL)
+        await asyncio.sleep(env.SESSION_CLEANUP_INTERVAL)
         
 def closeSession(session_id: str):
     if session_id in sessions:
@@ -54,8 +51,8 @@ async def get_root(request: Request):
     body_bytes = await request.body()
     json_str = body_bytes.decode("utf-8")
     requestData = json.loads(json_str)
-    if "session_id" in requestData:
-        getSession(requestData["session_id"]) #create or touch, don't care about session data here    
+    if env.SESSION_ID_FIELD_NAME in requestData:
+        getSession(requestData[env.SESSION_ID_FIELD_NAME]) #create or touch, don't care about session data here    
 
     resultData = json.dumps(coordinator.handle_get(requestData))
 
@@ -69,8 +66,8 @@ async def patch_root(request: Request):
     body_bytes = await request.body()
     json_str = body_bytes.decode("utf-8")
     requestData = json.loads(json_str)
-    if "session_id" in requestData:
-        getSession(requestData["session_id"]) #create or touch, don't care about session data here
+    if env.SESSION_ID_FIELD_NAME in requestData:
+        getSession(requestData[env.SESSION_ID_FIELD_NAME]) #create or touch, don't care about session data here
 
     resultData = json.dumps(coordinator.handle_patch(requestData))
 

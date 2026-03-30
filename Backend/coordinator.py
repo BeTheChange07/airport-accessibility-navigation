@@ -1,24 +1,22 @@
 #main only communicates with coordinator
-#main handles session management and everything async, passes sessions to coordinator
+#main handles session management and everything async
 
-import Backend.mapping.mapping as mapping, database, main
-
-INFRASTRUCTURE_TABLE_NAME = "infrastructure"
-NAVMESH_NODE_TABLE_NAME = "navmeshNodes"
-NAVMESH_EDGE_TABLE_NAME = "navmeshEdges"
-AMENITY_TABLE_NAME = "amenities"
+import Backend.mapping.mapping as mapping, database, main, env
 
 def start():
-    database.connect()
-    mapping.populateNavmeshNodes(database.fetchEntireTable(NAVMESH_NODE_TABLE_NAME))
-    mapping.populateNavmeshEdges(database.fetchEntireTable(NAVMESH_EDGE_TABLE_NAME))
-    mapping.populateAmenities(database.fetchEntireTable(AMENITY_TABLE_NAME))
+    env.load()
+    mapping.populateNavmeshNodes(database.fetchEntireTable(env.NAVMESH_NODE_TABLE_NAME), database.fetchEntireTable(env.AMENITY_TABLE_NAME))
+    mapping.populateNavmeshEdges(database.fetchEntireTable(env.NAVMESH_EDGE_TABLE_NAME))
 
 def stop():
     database.disconnect()
 
 def handle_get(data) -> str: #Receives and returns json object, not string 
-    return mapping.navigate(data)
+    navigationData = mapping.navigate(data)
+    amenityData = database.fetchEntireTable(env.AMENITY_TABLE_NAME)
+    amenityUnitsData = database.fetchEntireTable(env.AMENITY_UNIT_TABLE_NAME)
+    
+    return {"navigationData": navigationData, "amenityData": amenityData, "amenityUnitsData": amenityUnitsData}
 
 def handle_patch(data): #Receives and returns json object, not string
     if "updateType" not in data:

@@ -1,13 +1,11 @@
 from typing import Any
-import os, dotenv
 import psycopg2 as pg
 
-from coordinator import INFRASTRUCTURE_TABLE_NAME, AMENITY_TABLE_NAME
+import env
 
 _conn = None
 
 def connect():
-    dotenv.load_dotenv()
     global _conn
     if _conn is not None:
         try:
@@ -19,11 +17,11 @@ def connect():
 
     try:
         _conn = pg.connect(
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT"),
-            dbname=os.getenv("DB_NAME"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD"),
+            host=env.DB_HOST,
+            port=env.DB_PORT,
+            dbname=env.DB_NAME,
+            user=env.DB_USER,
+            password=env.DB_PASS,
             cursor_factory=pg.RealDictCursor  # Returns dicts instead of tuples
         )
         print("Database connection established.")
@@ -55,14 +53,14 @@ def disconnect():
         print("No active database connection to close.")
 
 def fetchEntireTable(tableName: str) -> list[dict[str, Any]]:
+    _ensure_connection()
     query = f'SELECT * FROM "{tableName}";'  # quote to handle case-sensitive table names
     with _conn.cursor() as cursor:
         cursor.execute(query)
-        rows = cursor.fetchall()
-    return rows
+        return cursor.fetchall()
 
-def updateAmenity(data: list[dict[str, Any]]): #TODO
+def updateAmenity(data: list[dict[str, Any]]): #TODO, sprint 2
     _ensure_connection()
 
-def updateInfrastructure(data: list[dict[str, Any]]): #TODO
+def updateInfrastructure(data: list[dict[str, Any]]): #TODO, sprint 2
     _ensure_connection()

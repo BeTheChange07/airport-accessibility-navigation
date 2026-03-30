@@ -3,6 +3,10 @@ from typing import Any #Why is this needed but not import dict
 from main import getSession
 from NearestNodeFinder import NearestNodeFinder
 
+#nav_nodes
+
+
+
 #GPS to node global vars
 NearestNodeFinderInstance = None
 nearestNodeIndexToNodeID: dict[int, int] = {} #Not going to assume nodeIDs are 0 to N-1, so need mapping from index in NearestNodeFinder's points array
@@ -14,7 +18,23 @@ infrastructure = None
 
 #Initial setup methods
 
-def populateNavmeshNodes(nodes: list[dict[str, Any]]): #Passed as json TODO
+def _getAmenityNodeIDs(amenities: list[dict[str, Any]]) -> set[int]:
+    #amenities table has:
+    #ID: int
+    #nodeID: int
+    #name: str
+    #type: str
+    #wheelChairAcessible: bool
+    #status: str
+    #crowdLevel: int
+    return set(amenity["nodeID"] for amenity in amenities)
+
+def populateNavmeshNodes(nodes: list[dict[str, Any]], amenities: list[dict[str, Any]]): #Passed as json TODO
+    destinationNodes = _getAmenityNodeIDs(amenities)
+    
+    
+    
+    
     # Make sure to also populate infrastructure dictionary and structure (quadtree? kt-tree?) for finding nearest node to a coordinate
     
     
@@ -25,12 +45,7 @@ def populateNavmeshNodes(nodes: list[dict[str, Any]]): #Passed as json TODO
     #NearestNodeFinderInstance.set_active_mask(activeMask)
     pass
 
-
-
 def populateNavmeshEdges(edges: list[dict[str, Any]]): #Passed as json TODO
-    pass
-
-def populateAmenities(amenities: list[dict[str, Any]]): #Passed as json TODO
     pass
 
 #Update methods, to be copied from coordinator
