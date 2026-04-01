@@ -286,7 +286,6 @@ def nearest_node():
         #raise #This is just here for testing to effectively disable the except block so it will actually propogate the error up the chain for debugging
         return jsonify({'error': str(e)}), 500
         
-
 @app.route('/api/nodes', methods=['GET'])
 def get_nodes():
     """
@@ -296,22 +295,40 @@ def get_nodes():
         type: filter by node_type (e.g., 'gate', 'amenity', 'restroom')
     """
     node_type = request.args.get('type')
+    node_zone = request.args.get('zone')
 
+    conditions = [] #I would include label != '' as a default but currently none of them are labeled
+    params = []
+
+    if node_type:
+        conditions.append("node_type = %s")
+        params.append(node_type)
+    if node_zone:
+        conditions.append("zone = %s")
+        params.append(node_zone)
+        
     try:
-        if node_type:
-            cur.execute("""
-                SELECT id, latitude, longitude, label, node_type
-                FROM nav_nodes
-                WHERE node_type = %s AND label != ''
-                ORDER BY label
-            """, (node_type,))
-        else:
-            cur.execute("""
-                SELECT id, latitude, longitude, label, node_type
-                FROM nav_nodes
-                WHERE label != ''
-                ORDER BY node_type, label
-            """)
+        cur.execute(f"""             
+            SELECT id, latitude, longitude, label, node_type
+            FROM nav_nodes
+            {"WHERE " + " AND ".join(conditions)}
+            ORDER BY label
+        """, params)
+                  
+        #if node_type:
+        #    cur.execute("""
+        #        SELECT id, latitude, longitude, label, node_type
+        #        FROM nav_nodes
+        #        WHERE node_type = %s AND label != '' AND zone = %s
+        #        ORDER BY label
+        #    """, (node_type,))
+        #else:
+        #    cur.execute("""
+        #        SELECT id, latitude, longitude, label, node_type
+        #        FROM nav_nodes
+        #        WHERE label != ''
+        #        ORDER BY node_type, label
+        #    """)
 
         nodes = cur.fetchall()
         
