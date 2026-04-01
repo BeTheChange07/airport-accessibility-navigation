@@ -82,6 +82,9 @@ def health():
 
 def routeHelperFunctionInQueryDijkstraReplacement(fromNode: int, toNode: int) -> list[dict[str, Any]]:
     #temporarily reuse djikstra query to get nodes ids to test the latter part of the function
+    #TODO actually replace this with a custom implementation of A* or something, but that's lower priority
+    #now that I've realised the rest of the function this was in was querying the database thousands
+    #of times per request
     cur.execute("""
         SELECT
             r.node
@@ -93,7 +96,6 @@ def routeHelperFunctionInQueryDijkstraReplacement(fromNode: int, toNode: int) ->
         ORDER BY r.seq
     """, (fromNode, toNode))
     node_ids = [row['node'] for row in cur.fetchall()]
-    
     
     
     
@@ -116,7 +118,9 @@ def routeHelperFunctionInQueryDijkstraReplacement(fromNode: int, toNode: int) ->
                 pp.seq,
                 pp.node,
                 e.id AS edge,
-                e.distance AS cost
+                e.distance AS cost,
+                e.direction,
+                e.from_node
             FROM path_pairs pp
             LEFT JOIN nav_edges e
                 ON (e.from_node = pp.node AND e.to_node = pp.next_node)
@@ -127,6 +131,8 @@ def routeHelperFunctionInQueryDijkstraReplacement(fromNode: int, toNode: int) ->
             pn.node_id AS node,
             pe.edge,
             COALESCE(pe.cost, 0) AS cost,
+            pe.direction AS \"edgeToNextNode_direction\",
+            pe.from_node AS \"edgeToNextNode_fromNode\",
             n.latitude,
             n.longitude,
             n.label,
@@ -167,48 +173,27 @@ def get_route():
 
         # Get edge directions for the path
         waypoints = []
-        total_distance = 0
         prev_direction = None
 
         for i, row in enumerate(rows):
             # Look up the direction of the edge to the next node
             current_direction = None
-            if i < len(rows) - 1:
-                next_node = rows[i + 1]['node']
-                cur.execute("""
-                    SELECT direction FROM nav_edges
-                    WHERE (from_node = %s AND to_node = %s)
-                       OR (from_node = %s AND to_node = %s)
-                    LIMIT 1
-                """, (row['node'], next_node, next_node, row['node']))
-                edge = cur.fetchone()
-                if edge:
-                    current_direction = edge['direction']
-                    # If the edge is reversed, flip the direction
-                    cur.execute("""
-                        SELECT direction FROM nav_edges
-                        WHERE from_node = %s AND to_node = %s
-                        LIMIT 1
-                    """, (row['node'], next_node))
-                    forward_edge = cur.fetchone()
-                    if forward_edge:
-                        current_direction = forward_edge['direction']
-                    else:
-                        # Edge is stored in reverse, flip direction
-                        opposite = {
-                            'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E',
-                            'NE': 'SW', 'SW': 'NE', 'NW': 'SE', 'SE': 'NW'
-                        }
-                        current_direction = opposite.get(current_direction, current_direction)
-
+            if i < len(rows) - 1 and row['edge'] is not None:  # If there's a next node and an edge exists
+                current_direction = row['edgeToNextNode_direction'] 
+                if row['edgeToNextNode_fromNode'] != row['node']:
+                    # Edge is stored in reverse, flip direction
+                    opposite = {
+                        'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E',
+                        'NE': 'SW', 'SW': 'NE', 'NW': 'SE', 'SE': 'NW'
+                    }
+                    current_direction = opposite.get(current_direction, current_direction)
+                    
             instruction = get_direction_instruction(
                 row['node'],
                 rows[i + 1]['node'] if i < len(rows) - 1 else None,
                 prev_direction,
                 current_direction
             ) if current_direction else ("You have arrived" if i == len(rows) - 1 else "Continue")
-
-            total_distance += row['cost'] if row['cost'] and row['cost'] > 0 else 0
 
             waypoints.append({
                 'seq': row['seq'],
@@ -225,6 +210,8 @@ def get_route():
             if current_direction:
                 prev_direction = current_direction
 
+        total_distance = sum(d.get("cost", 0) for d in rows) #Faster and fewer FP errors than summing it in the for loop
+        
         return jsonify({
             'from_node': from_node,
             'to_node': to_node,
@@ -234,7 +221,7 @@ def get_route():
         })
 
     except Exception as e:
-        raise #This is just here for testing to effectively disable the except block so it will actually propogate the error up the chain for debugging
+        raise #TODO comment out, this is just here for testing to effectively disable the except block so it will actually propogate the error up the chain for debugging
         return jsonify({'error': str(e)}), 500
 
 
