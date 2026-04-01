@@ -31,6 +31,12 @@ def _getAmenityNodeIDs(amenities: list[dict[str, Any]]) -> set[int]:
 
 def populateNavmeshNodes(nodes: list[dict[str, Any]], amenities: list[dict[str, Any]]): #Passed as json TODO
     destinationNodes = _getAmenityNodeIDs(amenities)
+    #id: integer
+    #latitude: double precision
+    #longitude: double precision
+    
+    #fuck it, worry about infrastructure id to nodeID mapping and node masking later
+    
     
     
     
