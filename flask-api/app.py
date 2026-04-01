@@ -221,7 +221,7 @@ def get_route():
         })
 
     except Exception as e:
-        raise #TODO comment out, this is just here for testing to effectively disable the except block so it will actually propogate the error up the chain for debugging
+        #raise #TODO comment out, this is just here for testing to effectively disable the except block so it will actually propogate the error up the chain for debugging
         return jsonify({'error': str(e)}), 500
 
 
