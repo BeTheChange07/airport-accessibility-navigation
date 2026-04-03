@@ -65,9 +65,12 @@ class MainActivity : ComponentActivity() {
                             )
                         )
                     }
+
+                    viewModel.setMockLocation()
                 }
 
                 NavigationScreen(viewModel = viewModel)
+
             }
         }
     }
@@ -132,6 +135,10 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                 indoorLevelPickerEnabled = true
             )
         ) {
+
+
+
+
             // Draw navigation route
             if (state.routePoints.isNotEmpty()) {
                 Polyline(
@@ -140,21 +147,30 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                     width = 12f
                 )
 
+                val startMarkerState = rememberMarkerState(
+                    position = state.routePoints.first()
+                )
+                val endMarkerState = rememberMarkerState(
+                    position = state.routePoints.last()
+                )
+
                 // Start marker
                 Marker(
-                    state = MarkerState(position = state.routePoints.first()),
+                    state = startMarkerState,
                     title = "Start",
                     icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_GREEN)
                 )
 
                 // End marker
                 Marker(
-                    state = MarkerState(position = state.routePoints.last()),
+                    state = endMarkerState,
                     title = "Destination",
                     icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
                 )
             }
         }
+
+
 
         // Turn-by-turn instruction bar at top
         if (state.isNavigating) {
@@ -210,15 +226,15 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                         modifier = Modifier.padding(bottom = 12.dp)
                     )
 
-                    // Demo: navigate from node 1425 to node 16733
+                    // Demo: navigate from node 1262 to node 1769
                     Button(
-                        onClick = { viewModel.fetchRoute(1425, 16733) },
+                        onClick = { viewModel.fetchRoute(1262, 1769) },
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Color(0xFF1A73E8)
                         )
                     ) {
-                        Text("Demo Route (1425 to 16733)", fontSize = 16.sp)
+                        Text("Demo Route (1262 to 1769)", fontSize = 16.sp)
                     }
                 } else {
                     Row(

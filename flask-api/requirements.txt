@@ -4,3 +4,5 @@ gunicorn
 python-dotenv
 numpy
 scipy
+numpy
+scipy

@@ -107,4 +107,12 @@ class NavigationViewModel : ViewModel() {
         val dlng = a.longitude - b.longitude
         return Math.sqrt(dlat * dlat + dlng * dlng)
     }
+
+    fun setMockLocation() {
+        _state.value = _state.value.copy(
+            userLocation = LatLng(32.89768836069466, -97.04474161852207)
+        )
+    }
+
+
 }

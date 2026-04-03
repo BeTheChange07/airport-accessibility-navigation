@@ -133,12 +133,10 @@ def routeHelperFunctionInQueryDijkstraReplacement(fromNode: int, toNode: int) ->
             COALESCE(pe.cost, 0) AS cost,
             pe.direction AS \"edgeToNextNode_direction\",
             pe.from_node AS \"edgeToNextNode_fromNode\",
-            n.latitude,
-            n.longitude,
+            n.lat AS latitude,
+            n.lng AS longitude,
             n.label,
-            n.node_type,
-            n.x,
-            n.y
+            n.node_type
         FROM path_nodes pn
         LEFT JOIN path_edges pe ON pe.seq = pn.seq
         JOIN nav_nodes n ON n.id = pn.node_id
@@ -245,9 +243,9 @@ def nearest_node():
 
     try:        
         if not hasattr(nearest_node, "finder"): 
-            cur.execute("SELECT id, latitude, longitude FROM nav_nodes") #TODO, sprint 2, make sure to account for active/inactive mask
+            cur.execute("SELECT id, lat, lng FROM nav_nodes") #TODO, sprint 2, make sure to account for active/inactive mask
             nodes = cur.fetchall()
-            coordinates = [(node['latitude'], node['longitude']) for node in nodes]
+            coordinates = [(node['lat'], node['lng']) for node in nodes]
             nearest_node.nearestNodeFinderInstance = NearestNodeFinder(coordinates)
             nearest_node.nodeIDs = [node['id'] for node in nodes] #I am not trusting that the node IDs are 0 to N-1, so need to keep track of mapping from nearestNodeFinder's points array index to nodeID
 
@@ -260,7 +258,7 @@ def nearest_node():
         print(f"nearest node id: {nearest_node_id}")
 
         cur.execute("""
-            SELECT id, latitude, longitude, label, node_type
+            SELECT id, lat AS latitude, lng AS longitude, label, node_type
             FROM nav_nodes
             WHERE id = %s
             LIMIT 1
@@ -308,10 +306,11 @@ def get_nodes():
         params.append(node_zone)
         
     try:
-        cur.execute(f"""             
-            SELECT id, latitude, longitude, label, node_type
+        where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        cur.execute(f"""
+            SELECT id, lat AS latitude, lng AS longitude, label, node_type
             FROM nav_nodes
-            {"WHERE " + " AND ".join(conditions)}
+            {where_clause}
             ORDER BY label
         """, params)
                   
