@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Terminal D - Node Calibration Tool</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; }
+        #map { width: 100%; height: 100vh; }
+        #panel {
+            position: absolute; top: 10px; left: 10px; z-index: 10;
+            background: white; padding: 16px; border-radius: 8px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.35);
+            width: 380px; max-height: calc(100vh - 20px);
+            overflow-y: auto;
+        }
+        #panel h2 { margin-bottom: 6px; font-size: 18px; }
+        #panel p.subtitle { font-size: 12px; color: #666; margin-bottom: 12px; }
+        .slider-group {
+            margin-bottom: 14px;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+        }
+        .slider-group label {
+            display: block; font-weight: bold; font-size: 13px; margin-bottom: 4px;
+        }
+        .slider-row {
+            display: flex; align-items: center; gap: 8px;
+        }
+        .slider-row input[type=range] {
+            flex: 1; cursor: pointer;
+        }
+        .slider-row input[type=number] {
+            width: 100px; padding: 3px 4px; font-size: 12px;
+            border: 1px solid #ccc; border-radius: 3px;
+        }
+        .value-display {
+            font-size: 11px; color: #555; margin-top: 2px;
+        }
+        .btn {
+            display: inline-block; padding: 8px 14px; margin: 4px 4px 4px 0;
+            border: none; border-radius: 5px; cursor: pointer;
+            font-size: 13px; font-weight: bold;
+        }
+        .btn-primary { background: #2196F3; color: white; }
+        .btn-primary:hover { background: #1976D2; }
+        .btn-success { background: #4CAF50; color: white; }
+        .btn-success:hover { background: #388E3C; }
+        .btn-secondary { background: #757575; color: white; }
+        .btn-secondary:hover { background: #616161; }
+        #sqlOutput {
+            margin-top: 10px; padding: 8px; font-family: monospace;
+            font-size: 10px; background: #f5f5f5; border: 1px solid #ddd;
+            border-radius: 4px; max-height: 200px; overflow-y: auto;
+            white-space: pre-wrap; word-break: break-all;
+            display: none;
+        }
+        #stats { margin-top: 8px; font-size: 12px; color: #666; }
+        #copyMsg {
+            display: none; font-size: 12px; color: #4CAF50;
+            margin-left: 4px; font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div id="panel">
+        <h2>Node Calibration</h2>
+        <p class="subtitle">Adjust sliders to align nodes with the terminal building. Then generate SQL to persist the correction.</p>
+
+        <div class="slider-group">
+            <label>Lat Offset (North/South)</label>
+            <div class="slider-row">
+                <input type="range" id="latOffsetSlider" min="-0.005" max="0.005" step="0.0000001" value="0">
+                <input type="number" id="latOffsetNum" step="0.0000001" value="0">
+            </div>
+        </div>
+
+        <div class="slider-group">
+            <label>Lng Offset (East/West)</label>
+            <div class="slider-row">
+                <input type="range" id="lngOffsetSlider" min="-0.005" max="0.005" step="0.0000001" value="0">
+                <input type="number" id="lngOffsetNum" step="0.0000001" value="0">
+            </div>
+        </div>
+
+        <div class="slider-group">
+            <label>Lat Scale (Vertical stretch)</label>
+            <div class="slider-row">
+                <input type="range" id="latScaleSlider" min="0.9" max="1.1" step="0.0001" value="1">
+                <input type="number" id="latScaleNum" step="0.0001" value="1">
+            </div>
+        </div>
+
+        <div class="slider-group">
+            <label>Lng Scale (Horizontal stretch)</label>
+            <div class="slider-row">
+                <input type="range" id="lngScaleSlider" min="0.9" max="1.1" step="0.0001" value="1">
+                <input type="number" id="lngScaleNum" step="0.0001" value="1">
+            </div>
+        </div>
+
+        <button class="btn btn-secondary" onclick="resetSliders()">Reset</button>
+        <button class="btn btn-primary" onclick="generateSQL()">Generate SQL</button>
+        <button class="btn btn-success" id="copyBtn" onclick="copySQL()" style="display:none;">Copy SQL</button>
+        <span id="copyMsg">Copied!</span>
+
+        <div id="sqlOutput"></div>
+        <div id="stats">Loading data...</div>
+    </div>
+
+    <script>
+        var map;
+        var nodeCircles = [];  // google.maps.Circle instances
+        var edgePolylines = []; // google.maps.Polyline instances
+        var originalNodes = []; // raw node data from API
+        var originalEdges = []; // raw edge data from API
+        var centerLat = 0, centerLng = 0; // centroid of all nodes
+
+        // Slider references
+        var latOffsetSlider = null, lngOffsetSlider = null;
+        var latScaleSlider = null, lngScaleSlider = null;
+        var latOffsetNum = null, lngOffsetNum = null;
+        var latScaleNum = null, lngScaleNum = null;
+
+        function initMap() {
+            map = new google.maps.Map(document.getElementById('map'), {
+                center: { lat: 32.8970, lng: -97.0440 },
+                zoom: 18,
+                mapTypeId: 'roadmap',
+            });
+
+            latOffsetSlider = document.getElementById('latOffsetSlider');
+            lngOffsetSlider = document.getElementById('lngOffsetSlider');
+            latScaleSlider = document.getElementById('latScaleSlider');
+            lngScaleSlider = document.getElementById('lngScaleSlider');
+            latOffsetNum = document.getElementById('latOffsetNum');
+            lngOffsetNum = document.getElementById('lngOffsetNum');
+            latScaleNum = document.getElementById('latScaleNum');
+            lngScaleNum = document.getElementById('lngScaleNum');
+
+            // Sync sliders and number inputs
+            function linkSliderAndNum(slider, num) {
+                slider.addEventListener('input', function() {
+                    num.value = slider.value;
+                    applyTransform();
+                });
+                num.addEventListener('input', function() {
+                    slider.value = num.value;
+                    applyTransform();
+                });
+            }
+            linkSliderAndNum(latOffsetSlider, latOffsetNum);
+            linkSliderAndNum(lngOffsetSlider, lngOffsetNum);
+            linkSliderAndNum(latScaleSlider, latScaleNum);
+            linkSliderAndNum(lngScaleSlider, lngScaleNum);
+
+            loadNodes();
+            loadEdges();
+        }
+
+        function transformCoord(origLat, origLng) {
+            var latOffset = parseFloat(latOffsetSlider.value) || 0;
+            var lngOffset = parseFloat(lngOffsetSlider.value) || 0;
+            var latScale = parseFloat(latScaleSlider.value) || 1;
+            var lngScale = parseFloat(lngScaleSlider.value) || 1;
+
+            var newLat = centerLat + (origLat - centerLat) * latScale + latOffset;
+            var newLng = centerLng + (origLng - centerLng) * lngScale + lngOffset;
+            return { lat: newLat, lng: newLng };
+        }
+
+        function applyTransform() {
+            // Reposition node circles
+            for (var i = 0; i < originalNodes.length; i++) {
+                var pos = transformCoord(originalNodes[i].latitude, originalNodes[i].longitude);
+                nodeCircles[i].setCenter(pos);
+            }
+            // Reposition edge polylines
+            for (var i = 0; i < originalEdges.length; i++) {
+                var e = originalEdges[i];
+                var from = transformCoord(e.from_lat, e.from_lng);
+                var to = transformCoord(e.to_lat, e.to_lng);
+                edgePolylines[i].setPath([from, to]);
+            }
+        }
+
+        function loadNodes() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/api/nodes');
+            xhr.onload = function() {
+                if (xhr.status !== 200) { console.error('nodes failed:', xhr.status); return; }
+                var data = JSON.parse(xhr.responseText);
+                originalNodes = data.nodes;
+
+                // Compute centroid
+                var sumLat = 0, sumLng = 0;
+                for (var i = 0; i < originalNodes.length; i++) {
+                    sumLat += originalNodes[i].latitude;
+                    sumLng += originalNodes[i].longitude;
+                }
+                centerLat = sumLat / originalNodes.length;
+                centerLng = sumLng / originalNodes.length;
+
+                // Create circles
+                for (var i = 0; i < originalNodes.length; i++) {
+                    var node = originalNodes[i];
+                    var pos = { lat: node.latitude, lng: node.longitude };
+
+                    var circle = new google.maps.Circle({
+                        center: pos, radius: 0.3,
+                        fillColor: '#4444ff', fillOpacity: 0.6,
+                        strokeColor: '#2222aa', strokeWeight: 0.5,
+                        map: map, clickable: true,
+                    });
+
+                    (function(n, c) {
+                        c.addListener('click', function() {
+                            var ctr = c.getCenter();
+                            new google.maps.InfoWindow({
+                                content: '<b>Node ' + n.id + '</b><br>Type: ' + (n.node_type || 'none') +
+                                         '<br>Label: ' + (n.label || 'none') +
+                                         '<br>Orig: ' + n.latitude.toFixed(7) + ', ' + n.longitude.toFixed(7) +
+                                         '<br>Adjusted: ' + ctr.lat().toFixed(7) + ', ' + ctr.lng().toFixed(7),
+                                position: ctr,
+                            }).open(map);
+                        });
+                    })(node, circle);
+
+                    nodeCircles.push(circle);
+                }
+
+                updateStats();
+            };
+            xhr.send();
+        }
+
+        function loadEdges() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/api/edges');
+            xhr.onload = function() {
+                if (xhr.status !== 200) { console.error('edges failed:', xhr.status); return; }
+                var data = JSON.parse(xhr.responseText);
+                originalEdges = data.edges;
+
+                for (var i = 0; i < originalEdges.length; i++) {
+                    var e = originalEdges[i];
+                    var line = new google.maps.Polyline({
+                        path: [
+                            { lat: e.from_lat, lng: e.from_lng },
+                            { lat: e.to_lat, lng: e.to_lng },
+                        ],
+                        strokeColor: '#ff6600', strokeOpacity: 0.5,
+                        strokeWeight: 1.5, map: map,
+                    });
+                    edgePolylines.push(line);
+                }
+
+                updateStats();
+            };
+            xhr.send();
+        }
+
+        function updateStats() {
+            document.getElementById('stats').textContent =
+                originalNodes.length + ' nodes, ' + originalEdges.length + ' edges loaded. ' +
+                'Centroid: ' + centerLat.toFixed(7) + ', ' + centerLng.toFixed(7);
+        }
+
+        function resetSliders() {
+            latOffsetSlider.value = 0; latOffsetNum.value = 0;
+            lngOffsetSlider.value = 0; lngOffsetNum.value = 0;
+            latScaleSlider.value = 1; latScaleNum.value = 1;
+            lngScaleSlider.value = 1; lngScaleNum.value = 1;
+            applyTransform();
+            document.getElementById('sqlOutput').style.display = 'none';
+            document.getElementById('copyBtn').style.display = 'none';
+        }
+
+        function generateSQL() {
+            if (originalNodes.length === 0) {
+                alert('No nodes loaded yet.');
+                return;
+            }
+
+            var latOffset = parseFloat(latOffsetSlider.value) || 0;
+            var lngOffset = parseFloat(lngOffsetSlider.value) || 0;
+            var latScale = parseFloat(latScaleSlider.value) || 1;
+            var lngScale = parseFloat(lngScaleSlider.value) || 1;
+
+            var latCases = [];
+            var lngCases = [];
+            var ids = [];
+
+            for (var i = 0; i < originalNodes.length; i++) {
+                var n = originalNodes[i];
+                var pos = transformCoord(n.latitude, n.longitude);
+                ids.push(n.id);
+                latCases.push('WHEN ' + n.id + ' THEN ' + pos.lat.toFixed(10));
+                lngCases.push('WHEN ' + n.id + ' THEN ' + pos.lng.toFixed(10));
+            }
+
+            var sql = 'UPDATE nav_nodes SET\n' +
+                '  lat = CASE id\n    ' + latCases.join('\n    ') + '\n  END,\n' +
+                '  lng = CASE id\n    ' + lngCases.join('\n    ') + '\n  END\n' +
+                'WHERE id IN (' + ids.join(',') + ');\n';
+
+            var el = document.getElementById('sqlOutput');
+            el.textContent = sql;
+            el.style.display = 'block';
+            document.getElementById('copyBtn').style.display = 'inline-block';
+        }
+
+        function copySQL() {
+            var sql = document.getElementById('sqlOutput').textContent;
+            navigator.clipboard.writeText(sql).then(function() {
+                var msg = document.getElementById('copyMsg');
+                msg.style.display = 'inline';
+                setTimeout(function() { msg.style.display = 'none'; }, 2000);
+            });
+        }
+    </script>
+    <script async defer
+        src="https://maps.googleapis.com/maps/api/js?key={{MAPS_API_KEY}}&callback=initMap">
+    </script>
+</body>
+</html>

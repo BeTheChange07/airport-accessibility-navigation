@@ -4,8 +4,9 @@ Flask backend for DFW Terminal D turn-by-turn navigation
 """
 
 import os
+import math
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory, render_template_string
 from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -36,6 +37,33 @@ def exitHandler():
     databaseConnection.close()
 
 atexit.register(exitHandler)
+
+def calculate_bearing(lat1, lng1, lat2, lng2):
+    """Calculate bearing in degrees from north between two lat/lng points."""
+    lat1_r, lat2_r = math.radians(lat1), math.radians(lat2)
+    dlng = math.radians(lng2 - lng1)
+    x = math.sin(dlng) * math.cos(lat2_r)
+    y = math.cos(lat1_r) * math.sin(lat2_r) - math.sin(lat1_r) * math.cos(lat2_r) * math.cos(dlng)
+    bearing = math.degrees(math.atan2(x, y))
+    return (bearing + 360) % 360
+
+
+def bearing_to_cardinal(bearing):
+    """Convert a bearing in degrees to an 8-point cardinal direction label."""
+    directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+    index = round(bearing / 45) % 8
+    return directions[index]
+
+
+def haversine_distance_meters(lat1, lng1, lat2, lng2):
+    """Calculate distance between two lat/lng points in meters using the haversine formula."""
+    R = 6371000  # Earth radius in meters
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lng2 - lng1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
 
 def get_direction_instruction(from_node, to_node, prev_direction, current_direction):
     """Generate a human-readable turn instruction."""
@@ -68,6 +96,26 @@ def get_direction_instruction(from_node, to_node, prev_direction, current_direct
             return "Slight left"
 
     return "Continue"
+
+
+@app.route('/map')
+def serve_map():
+    """Serve the debug map visualization page with API key injected."""
+    with open(os.path.join(os.path.dirname(__file__), 'map_debug.html'), 'r') as f:
+        html = f.read()
+    api_key = os.environ.get('MAPS_API_KEY', '')
+    html = html.replace('{{MAPS_API_KEY}}', api_key)
+    return html
+
+
+@app.route('/calibrate')
+def serve_calibrate():
+    """Serve the node calibration tool with API key injected."""
+    with open(os.path.join(os.path.dirname(__file__), 'calibrate_nodes.html'), 'r') as f:
+        html = f.read()
+    api_key = os.environ.get('MAPS_API_KEY', '')
+    html = html.replace('{{MAPS_API_KEY}}', api_key)
+    return html
 
 
 @app.route('/api/health', methods=['GET'])
@@ -177,7 +225,7 @@ def get_route():
             # Look up the direction of the edge to the next node
             current_direction = None
             if i < len(rows) - 1 and row['edge'] is not None:  # If there's a next node and an edge exists
-                current_direction = row['edgeToNextNode_direction'] 
+                current_direction = row['edgeToNextNode_direction']
                 if row['edgeToNextNode_fromNode'] != row['node']:
                     # Edge is stored in reverse, flip direction
                     opposite = {
@@ -185,7 +233,23 @@ def get_route():
                         'NE': 'SW', 'SW': 'NE', 'NW': 'SE', 'SE': 'NW'
                     }
                     current_direction = opposite.get(current_direction, current_direction)
-                    
+
+            # Calculate bearing and distance to next node using lat/lng
+            bearing_to_next = None
+            cardinal_label = None
+            distance_meters = 0.0
+            if i < len(rows) - 1:
+                next_row = rows[i + 1]
+                bearing_to_next = calculate_bearing(
+                    row['latitude'], row['longitude'],
+                    next_row['latitude'], next_row['longitude']
+                )
+                cardinal_label = bearing_to_cardinal(bearing_to_next)
+                distance_meters = haversine_distance_meters(
+                    row['latitude'], row['longitude'],
+                    next_row['latitude'], next_row['longitude']
+                )
+
             instruction = get_direction_instruction(
                 row['node'],
                 rows[i + 1]['node'] if i < len(rows) - 1 else None,
@@ -203,6 +267,9 @@ def get_route():
                 'direction': current_direction,
                 'instruction': instruction,
                 'distance_to_next': row['cost'] if row['cost'] and row['cost'] > 0 else 0,
+                'bearing_to_next': round(bearing_to_next, 2) if bearing_to_next is not None else None,
+                'cardinal_direction': cardinal_label,
+                'distance_meters': round(distance_meters, 2),
             })
 
             if current_direction:
@@ -231,44 +298,66 @@ def nearest_node():
     Query params:
         lat: latitude
         lng: longitude
+        zone: (optional) restrict candidates to nodes in this zone
+              (e.g. 'public' or 'secure'). Nodes with NULL zone are
+              treated as 'public'. When omitted, all nodes are eligible.
 
     Returns:
-        The closest node with its ID and other parameters.
+        The closest node with its ID, coordinates, label, node_type,
+        and zone.
     """
     lat = request.args.get('lat', type=float)
     lng = request.args.get('lng', type=float)
+    zone_param = request.args.get('zone')
 
     if lat is None or lng is None:
         return jsonify({'error': 'lat and lng are required'}), 400
 
-    try:        
-        if not hasattr(nearest_node, "finder"): 
-            cur.execute("SELECT id, lat, lng FROM nav_nodes") #TODO, sprint 2, make sure to account for active/inactive mask
+    try:
+        # Cache one KDTree per zone filter so repeated calls are fast.
+        # Key '__all__' means "no zone filter".
+        if not hasattr(nearest_node, "finders"):
+            nearest_node.finders = {}
+            nearest_node.node_ids_by_key = {}
+
+        cache_key = zone_param if zone_param else '__all__'
+
+        if cache_key not in nearest_node.finders:
+            if zone_param:
+                cur.execute("""
+                    SELECT DISTINCT n.id, n.lat, n.lng FROM nav_nodes n
+                    WHERE EXISTS (SELECT 1 FROM nav_edges e WHERE e.from_node = n.id OR e.to_node = n.id)
+                      AND COALESCE(n.zone, 'public') = %s
+                """, (zone_param,))
+            else:
+                cur.execute("""
+                    SELECT DISTINCT n.id, n.lat, n.lng FROM nav_nodes n
+                    WHERE EXISTS (SELECT 1 FROM nav_edges e WHERE e.from_node = n.id OR e.to_node = n.id)
+                """)
             nodes = cur.fetchall()
+            if not nodes:
+                return jsonify({'error': f'No nodes available for zone {zone_param}'}), 404
             coordinates = [(node['lat'], node['lng']) for node in nodes]
-            nearest_node.nearestNodeFinderInstance = NearestNodeFinder(coordinates)
-            nearest_node.nodeIDs = [node['id'] for node in nodes] #I am not trusting that the node IDs are 0 to N-1, so need to keep track of mapping from nearestNodeFinder's points array index to nodeID
+            nearest_node.finders[cache_key] = NearestNodeFinder(coordinates)
+            nearest_node.node_ids_by_key[cache_key] = [node['id'] for node in nodes]
 
-        print("got to query")
+        nearest_index = nearest_node.finders[cache_key].get_nearest_active_node((lat, lng))
+        nearest_node_id = nearest_node.node_ids_by_key[cache_key][nearest_index]
 
-        #Insert here query for node states and call nearestNodeFinderInstance.set_active_mask() before querying for nearest node, to ensure we are only returning active nodes
-        nearest_index = nearest_node.nearestNodeFinderInstance.get_nearest_active_node((lat, lng))
-        nearest_node_id = nearest_node.nodeIDs[nearest_index]
-
-        print(f"nearest node id: {nearest_node_id}")
+        print(f"nearest node id: {nearest_node_id} (zone filter: {zone_param or 'none'})")
 
         cur.execute("""
-            SELECT id, lat AS latitude, lng AS longitude, label, node_type
+            SELECT id, lat AS latitude, lng AS longitude, label, node_type, zone
             FROM nav_nodes
             WHERE id = %s
             LIMIT 1
         """, (nearest_node_id, )) #Comma to make it a tuple and not just a parenthesized expression
         print("executed rds query")
-        
+
         node = cur.fetchone()
-        
+
         print(node)
-        
+
         if not node:
             return jsonify({'error': 'No nodes found'}), 404
 
@@ -278,6 +367,7 @@ def nearest_node():
             'longitude': node['longitude'],
             'label': node['label'] or '',
             'node_type': node['node_type'] or 'waypoint',
+            'zone': node['zone'] or 'public',
         })
 
     except Exception as e:
@@ -332,6 +422,194 @@ def get_nodes():
         nodes = cur.fetchall()
         
         return jsonify({'nodes': list(nodes)})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/edges', methods=['GET'])
+def get_edges():
+    """Return all nav_edges for visualization."""
+    try:
+        c = databaseConnection.cursor()
+        c.execute("""
+            SELECT e.id, e.from_node, e.to_node, e.distance, e.direction,
+                   n1.lat AS from_lat, n1.lng AS from_lng,
+                   n2.lat AS to_lat, n2.lng AS to_lng
+            FROM nav_edges e
+            JOIN nav_nodes n1 ON n1.id = e.from_node
+            JOIN nav_nodes n2 ON n2.id = e.to_node
+        """)
+        edges = c.fetchall()
+        c.close()
+        return jsonify({'edges': list(edges)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/amenities', methods=['GET'])
+def get_amenities():
+    """Return all amenities for visualization."""
+    try:
+        c = databaseConnection.cursor()
+        c.execute("""
+            SELECT a.id, a.nodeid, a.name, a.type, a.latitude, a.longitude,
+                   a.status, a.wheelchairaccessible
+            FROM amenities a
+            ORDER BY a.type, a.name
+        """)
+        amenities = c.fetchall()
+        c.close()
+        return jsonify({'amenities': list(amenities)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/amenity-types', methods=['GET'])
+def get_amenity_types():
+    """Return the distinct amenity categories available for destination selection."""
+    try:
+        cur.execute("""
+            SELECT DISTINCT type
+            FROM amenities
+            WHERE type IS NOT NULL AND type != ''
+            ORDER BY type
+        """)
+        types = [row['type'] for row in cur.fetchall()]
+        return jsonify({'amenity_types': types})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/route-to-amenity', methods=['GET'])
+def route_to_amenity():
+    """
+    Find the nearest amenity of a given type to the starting node and return the route.
+
+    Query params:
+        from_node: starting node ID
+        amenity_type: the amenity type to search for (e.g. 'gate', 'restroom', 'food')
+    """
+    from_node = request.args.get('from_node', type=int)
+    amenity_type = request.args.get('amenity_type', type=str)
+
+    if from_node is None or not amenity_type:
+        return jsonify({'error': 'from_node and amenity_type are required'}), 400
+
+    try:
+        # Get the starting node's coordinates AND zone
+        cur.execute("SELECT lat, lng, zone FROM nav_nodes WHERE id = %s", (from_node,))
+        start = cur.fetchone()
+        if not start:
+            return jsonify({'error': 'Starting node not found'}), 404
+
+        start_zone = start['zone'] or 'public'
+
+        # Get all amenities of the requested type whose linked nav_node is in the
+        # SAME zone as the starting node. Secure-side users can only reach secure
+        # amenities; public-side users can only reach public ones.
+        cur.execute("""
+            SELECT a.id AS amenity_id, a.nodeID, a.name, a.type,
+                   a.latitude, a.longitude, n.zone AS node_zone
+            FROM amenities a
+            JOIN nav_nodes n ON n.id = a.nodeID
+            WHERE a.type = %s AND COALESCE(n.zone, 'public') = %s
+        """, (amenity_type, start_zone))
+        candidates = cur.fetchall()
+
+        if not candidates:
+            return jsonify({
+                'error': f'No {amenity_type} amenities reachable from your zone ({start_zone})'
+            }), 404
+
+        # Sort candidates by straight-line distance (nearest first)
+        candidates.sort(key=lambda c: haversine_distance_meters(
+            start['lat'], start['lng'], c['latitude'], c['longitude']
+        ))
+
+        # Try each candidate until we find one that is routable
+        rows = None
+        nearest = None
+        target_node_id = None
+        for candidate in candidates:
+            target_node_id = candidate['nodeid']
+            try:
+                result = routeHelperFunctionInQueryDijkstraReplacement(from_node, target_node_id)
+                if result:
+                    rows = result
+                    nearest = candidate
+                    break
+            except Exception:
+                continue  # This candidate's node is unreachable, try next
+
+        if not rows or not nearest:
+            return jsonify({'error': 'No routable amenity of that type found'}), 404
+
+        waypoints = []
+        prev_direction = None
+
+        for i, row in enumerate(rows):
+            current_direction = None
+            if i < len(rows) - 1 and row['edge'] is not None:
+                current_direction = row['edgeToNextNode_direction']
+                if row['edgeToNextNode_fromNode'] != row['node']:
+                    opposite = {
+                        'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E',
+                        'NE': 'SW', 'SW': 'NE', 'NW': 'SE', 'SE': 'NW'
+                    }
+                    current_direction = opposite.get(current_direction, current_direction)
+
+            bearing_to_next = None
+            cardinal_label = None
+            distance_meters = 0.0
+            if i < len(rows) - 1:
+                next_row = rows[i + 1]
+                bearing_to_next = calculate_bearing(
+                    row['latitude'], row['longitude'],
+                    next_row['latitude'], next_row['longitude']
+                )
+                cardinal_label = bearing_to_cardinal(bearing_to_next)
+                distance_meters = haversine_distance_meters(
+                    row['latitude'], row['longitude'],
+                    next_row['latitude'], next_row['longitude']
+                )
+
+            instruction = get_direction_instruction(
+                row['node'],
+                rows[i + 1]['node'] if i < len(rows) - 1 else None,
+                prev_direction,
+                current_direction
+            ) if current_direction else ("You have arrived" if i == len(rows) - 1 else "Continue")
+
+            waypoints.append({
+                'seq': row['seq'],
+                'node_id': row['node'],
+                'latitude': row['latitude'],
+                'longitude': row['longitude'],
+                'label': row['label'] or '',
+                'node_type': row['node_type'] or 'waypoint',
+                'direction': current_direction,
+                'instruction': instruction,
+                'distance_to_next': row['cost'] if row['cost'] and row['cost'] > 0 else 0,
+                'bearing_to_next': round(bearing_to_next, 2) if bearing_to_next is not None else None,
+                'cardinal_direction': cardinal_label,
+                'distance_meters': round(distance_meters, 2),
+            })
+
+            if current_direction:
+                prev_direction = current_direction
+
+        total_distance = sum(d.get("cost", 0) for d in rows)
+
+        return jsonify({
+            'from_node': from_node,
+            'to_node': target_node_id,
+            'amenity_type': amenity_type,
+            'destination_name': nearest['name'] or amenity_type,
+            'total_distance': total_distance,
+            'num_waypoints': len(waypoints),
+            'waypoints': waypoints
+        })
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500

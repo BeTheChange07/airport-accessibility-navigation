@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Terminal D - Node/Edge/Amenity Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; }
+        #map { width: 100%; height: 100vh; }
+        #controls {
+            position: absolute; top: 10px; right: 10px; z-index: 10;
+            background: white; padding: 14px; border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3); max-width: 260px;
+        }
+        #controls h3 { margin-bottom: 8px; }
+        #controls label { display: block; margin: 4px 0; cursor: pointer; font-size: 14px; }
+        #controls input[type=checkbox] { margin-right: 6px; }
+        #stats { margin-top: 10px; font-size: 12px; color: #666; }
+        #legend { margin-top: 10px; font-size: 12px; }
+        .legend-item { display: flex; align-items: center; margin: 3px 0; }
+        .legend-dot { width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; flex-shrink: 0; }
+        select { width: 100%; padding: 4px; margin-top: 4px; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div id="controls">
+        <h3>Layer Controls</h3>
+        <label><input type="checkbox" id="toggleNodes" checked> Nav Nodes <span id="nodeCount">(loading...)</span></label>
+        <label><input type="checkbox" id="toggleEdges" checked> Nav Edges <span id="edgeCount">(loading...)</span></label>
+        <label><input type="checkbox" id="toggleAmenities" checked> Amenities <span id="amenityCount">(loading...)</span></label>
+        <label><input type="checkbox" id="toggleLabels"> Node ID Labels</label>
+        <hr style="margin: 8px 0">
+        <label><strong>Amenity Filter:</strong></label>
+        <select id="amenityFilter">
+            <option value="all">All Types</option>
+        </select>
+        <div id="stats">Loading data...</div>
+        <div id="legend">
+            <strong>Amenity Colors:</strong>
+            <div class="legend-item"><div class="legend-dot" style="background:#e74c3c"></div>Restroom</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#2ecc71"></div>Gate</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#f39c12"></div>Food</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#9b59b6"></div>Shop</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#3498db"></div>Elevator</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#1abc9c"></div>Escalator</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#e67e22"></div>Lounge</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#95a5a6"></div>Other</div>
+        </div>
+    </div>
+
+    <script>
+        const AMENITY_COLORS = {
+            restroom: '#e74c3c', gate: '#2ecc71', food: '#f39c12',
+            shop: '#9b59b6', elevator: '#3498db', escalator: '#1abc9c',
+            lounge: '#e67e22', information: '#2c3e50', chapel: '#8e44ad',
+            children_area: '#e91e63', lactation_room: '#ff69b4', tsa: '#607d8b',
+            atm: '#00bcd4', currency_exchange: '#009688', rest: '#795548',
+            amenity: '#95a5a6',
+        };
+
+        var map, nodeMarkers = [], nodeLabels = [], edgeLines = [], amenityMarkers = [];
+
+        function initMap() {
+            map = new google.maps.Map(document.getElementById('map'), {
+                center: { lat: 32.8970, lng: -97.0440 },
+                zoom: 18,
+                mapTypeId: 'roadmap',
+            });
+
+            console.log('Map initialized, loading data...');
+
+            // Load all three in parallel
+            loadNodes();
+            loadEdges();
+            loadAmenities();
+
+            // Toggle controls
+            document.getElementById('toggleNodes').addEventListener('change', function() {
+                nodeMarkers.forEach(function(m) { m.setVisible(this.checked); }.bind(this));
+            });
+            document.getElementById('toggleEdges').addEventListener('change', function() {
+                edgeLines.forEach(function(l) { l.setVisible(this.checked); }.bind(this));
+            });
+            document.getElementById('toggleAmenities').addEventListener('change', function() {
+                filterAmenities();
+            });
+            document.getElementById('toggleLabels').addEventListener('change', function() {
+                nodeLabels.forEach(function(l) { l.setVisible(this.checked); }.bind(this));
+            });
+            document.getElementById('amenityFilter').addEventListener('change', function() {
+                filterAmenities();
+            });
+        }
+
+        function loadNodes() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/api/nodes');
+            xhr.onload = function() {
+                if (xhr.status !== 200) { console.error('nodes failed:', xhr.status); return; }
+                var data = JSON.parse(xhr.responseText);
+                var nodes = data.nodes;
+                console.log('Loaded ' + nodes.length + ' nodes');
+                document.getElementById('nodeCount').textContent = '(' + nodes.length + ')';
+
+                for (var i = 0; i < nodes.length; i++) {
+                    var node = nodes[i];
+                    var pos = { lat: node.latitude, lng: node.longitude };
+
+                    var circle = new google.maps.Circle({
+                        center: pos, radius: 0.3,
+                        fillColor: '#4444ff', fillOpacity: 0.6,
+                        strokeColor: '#2222aa', strokeWeight: 0.5,
+                        map: map, clickable: true,
+                    });
+
+                    // closure for click
+                    (function(n, p) {
+                        circle.addListener('click', function() {
+                            new google.maps.InfoWindow({
+                                content: '<b>Node ' + n.id + '</b><br>Type: ' + (n.node_type || 'none') +
+                                         '<br>Label: ' + (n.label || 'none') +
+                                         '<br>' + n.latitude + ', ' + n.longitude,
+                                position: p,
+                            }).open(map);
+                        });
+                    })(node, pos);
+
+                    nodeMarkers.push(circle);
+
+                    var label = new google.maps.Marker({
+                        position: pos, map: map,
+                        icon: { path: google.maps.SymbolPath.CIRCLE, scale: 0 },
+                        label: { text: String(node.id), fontSize: '8px', color: '#333' },
+                        visible: false,
+                    });
+                    nodeLabels.push(label);
+                }
+                updateStats();
+            };
+            xhr.onerror = function() { console.error('nodes request failed'); };
+            xhr.send();
+        }
+
+        function loadEdges() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/api/edges');
+            xhr.onload = function() {
+                if (xhr.status !== 200) { console.error('edges failed:', xhr.status, xhr.responseText); return; }
+                var data = JSON.parse(xhr.responseText);
+                var edges = data.edges;
+                console.log('Loaded ' + edges.length + ' edges');
+                document.getElementById('edgeCount').textContent = '(' + edges.length + ')';
+
+                for (var i = 0; i < edges.length; i++) {
+                    var e = edges[i];
+                    var line = new google.maps.Polyline({
+                        path: [
+                            { lat: e.from_lat, lng: e.from_lng },
+                            { lat: e.to_lat, lng: e.to_lng },
+                        ],
+                        strokeColor: '#ff6600', strokeOpacity: 0.5,
+                        strokeWeight: 1.5, map: map,
+                    });
+
+                    (function(edge) {
+                        line.addListener('click', function(ev) {
+                            new google.maps.InfoWindow({
+                                content: '<b>Edge ' + edge.id + '</b><br>' + edge.from_node + ' &rarr; ' + edge.to_node +
+                                         '<br>Dir: ' + edge.direction + '<br>Dist: ' + edge.distance,
+                                position: ev.latLng,
+                            }).open(map);
+                        });
+                    })(e);
+
+                    edgeLines.push(line);
+                }
+                updateStats();
+            };
+            xhr.onerror = function() { console.error('edges request failed'); };
+            xhr.send();
+        }
+
+        function loadAmenities() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/api/amenities');
+            xhr.onload = function() {
+                if (xhr.status !== 200) { console.error('amenities failed:', xhr.status, xhr.responseText); return; }
+                var data = JSON.parse(xhr.responseText);
+                var amenities = data.amenities;
+                console.log('Loaded ' + amenities.length + ' amenities');
+                document.getElementById('amenityCount').textContent = '(' + amenities.length + ')';
+
+                // Populate filter dropdown
+                var typesSet = {};
+                amenities.forEach(function(a) { typesSet[a.type] = (typesSet[a.type] || 0) + 1; });
+                var select = document.getElementById('amenityFilter');
+                Object.keys(typesSet).sort().forEach(function(t) {
+                    var opt = document.createElement('option');
+                    opt.value = t;
+                    opt.textContent = t + ' (' + typesSet[t] + ')';
+                    select.appendChild(opt);
+                });
+
+                for (var i = 0; i < amenities.length; i++) {
+                    var a = amenities[i];
+                    var color = AMENITY_COLORS[a.type] || '#95a5a6';
+                    var marker = new google.maps.Marker({
+                        position: { lat: a.latitude, lng: a.longitude },
+                        map: map,
+                        icon: {
+                            path: google.maps.SymbolPath.CIRCLE,
+                            scale: 7, fillColor: color, fillOpacity: 0.9,
+                            strokeColor: '#fff', strokeWeight: 2,
+                        },
+                        title: a.name,
+                    });
+
+                    (function(amenity) {
+                        marker.addListener('click', function() {
+                            new google.maps.InfoWindow({
+                                content: '<b>' + amenity.name + '</b><br>Type: ' + amenity.type +
+                                         '<br>NodeID: ' + amenity.nodeid +
+                                         '<br>' + amenity.latitude + ', ' + amenity.longitude,
+                            }).open(map, this);
+                        });
+                    })(a);
+
+                    marker._amenityType = a.type;
+                    amenityMarkers.push(marker);
+                }
+                updateStats();
+            };
+            xhr.onerror = function() { console.error('amenities request failed'); };
+            xhr.send();
+        }
+
+        function filterAmenities() {
+            var show = document.getElementById('toggleAmenities').checked;
+            var filter = document.getElementById('amenityFilter').value;
+            amenityMarkers.forEach(function(m) {
+                m.setVisible(show && (filter === 'all' || m._amenityType === filter));
+            });
+        }
+
+        function updateStats() {
+            document.getElementById('stats').textContent =
+                nodeMarkers.length + ' nodes, ' + edgeLines.length + ' edges, ' + amenityMarkers.length + ' amenities';
+        }
+    </script>
+    <script async defer
+        src="https://maps.googleapis.com/maps/api/js?key={{MAPS_API_KEY}}&callback=initMap">
+    </script>
+</body>
+</html>

@@ -13,7 +13,10 @@ data class RouteResponse(
     val to_node: Int,
     val total_distance: Double,
     val num_waypoints: Int,
-    val waypoints: List<Waypoint>
+    val waypoints: List<Waypoint>,
+    // Present only in route-to-amenity responses
+    val amenity_type: String? = null,
+    val destination_name: String? = null
 )
 
 data class Waypoint(
@@ -25,7 +28,10 @@ data class Waypoint(
     val node_type: String,
     val direction: String?,
     val instruction: String,
-    val distance_to_next: Double
+    val distance_to_next: Double,
+    val bearing_to_next: Double?,
+    val cardinal_direction: String?,
+    val distance_meters: Double?
 )
 
 data class NearestNodeResponse(
@@ -33,7 +39,8 @@ data class NearestNodeResponse(
     val latitude: Double,
     val longitude: Double,
     val label: String,
-    val node_type: String
+    val node_type: String,
+    val zone: String? = null
 )
 
 data class NodesResponse(
@@ -48,6 +55,10 @@ data class NodeItem(
     val node_type: String
 )
 
+data class AmenityTypesResponse(
+    val amenity_types: List<String>
+)
+
 // Retrofit API interface
 interface NavigationApiService {
 
@@ -60,13 +71,23 @@ interface NavigationApiService {
     @GET("/api/nearest")
     suspend fun getNearestNode(
         @Query("lat") lat: Double,
-        @Query("lng") lng: Double
+        @Query("lng") lng: Double,
+        @Query("zone") zone: String? = null
     ): NearestNodeResponse
 
     @GET("/api/nodes")
     suspend fun getNodes(
         @Query("type") type: String? = null
     ): NodesResponse
+
+    @GET("/api/amenity-types")
+    suspend fun getAmenityTypes(): AmenityTypesResponse
+
+    @GET("/api/route-to-amenity")
+    suspend fun getRouteToAmenity(
+        @Query("from_node") fromNode: Int,
+        @Query("amenity_type") amenityType: String
+    ): RouteResponse
 }
 
 // Singleton to create the API client
