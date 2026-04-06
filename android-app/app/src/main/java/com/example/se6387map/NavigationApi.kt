@@ -1,5 +1,6 @@
 package com.example.se6387map
 
+import com.example.se6387map.BuildConfig
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
@@ -112,7 +113,7 @@ interface NavigationApiService {
 
 // Singleton to create the API client
 object NavigationApi {
-    private const val BASE_URL = "http://192.168.53.137:5000/"
+    private val BASE_URL = BuildConfig.API_BASE_URL
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
