@@ -59,6 +59,22 @@ data class AmenityTypesResponse(
     val amenity_types: List<String>
 )
 
+data class Amenity(
+    val id: Int,
+    val nodeid: Int,
+    val name: String,
+    val type: String,
+    val latitude: Double,
+    val longitude: Double,
+    val status: String,
+    val wheelchairaccessible: String?,
+    val has_accessible_unit: Boolean?
+)
+
+data class AmenitiesResponse(
+    val amenities: List<Amenity>
+)
+
 // Retrofit API interface
 interface NavigationApiService {
 
@@ -83,10 +99,14 @@ interface NavigationApiService {
     @GET("/api/amenity-types")
     suspend fun getAmenityTypes(): AmenityTypesResponse
 
+    @GET("/api/amenities")
+    suspend fun getAmenities(): AmenitiesResponse
+
     @GET("/api/route-to-amenity")
     suspend fun getRouteToAmenity(
         @Query("from_node") fromNode: Int,
-        @Query("amenity_type") amenityType: String
+        @Query("amenity_type") amenityType: String,
+        @Query("accessible") accessible: Boolean? = null
     ): RouteResponse
 }
 

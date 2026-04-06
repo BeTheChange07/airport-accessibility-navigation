@@ -14,6 +14,8 @@ const val SIMULATION_STEP_INTERVAL_MS = 2000L
 const val OFF_PATH_THRESHOLD_METERS = 15.0
 const val OFF_PATH_TELEPORT_METERS = 25.0
 
+enum class RestroomGender { ANY, MALE, FEMALE }
+
 data class NavigationState(
     val isLoading: Boolean = false,
     val routePoints: List<LatLng> = emptyList(),
@@ -38,8 +40,38 @@ data class NavigationState(
     // Zone of the user's current starting node ('public' or 'secure').
     // Used to keep off-path teleports and recalculations within the
     // same airside/landside partition as the user.
-    val currentZone: String? = null
+    val currentZone: String? = null,
+    // Amenities + filters
+    val amenities: List<Amenity> = emptyList(),
+    val selectedAmenity: Amenity? = null,
+    val accessibilityMode: Boolean = false,
+    val activeTypeFilters: Set<String> = emptySet(),
+    val showAmenityList: Boolean = false,
+    // Single-type focus from the dropdown (separate from chip multi-select)
+    val dropdownTypeFilter: String? = null,
+    val restroomGenderFilter: RestroomGender = RestroomGender.ANY,
 )
+
+fun filteredAmenities(state: NavigationState): List<Amenity> = state.amenities.filter { a ->
+    val chipOk = state.activeTypeFilters.isEmpty() || a.type in state.activeTypeFilters
+    val dropdownOk = state.dropdownTypeFilter == null || a.type == state.dropdownTypeFilter
+    val accessOk = !state.accessibilityMode ||
+        a.has_accessible_unit == true ||
+        a.wheelchairaccessible.equals("yes", ignoreCase = true)
+    val genderOk = if (state.dropdownTypeFilter == "restroom" &&
+        state.restroomGenderFilter != RestroomGender.ANY
+    ) {
+        // Check Female first — "Female Bathroom" contains the substring "male".
+        val isFemale = a.name.startsWith("Female", ignoreCase = true)
+        val isMale = !isFemale && a.name.contains(Regex("(?i)\\bmale\\b"))
+        when (state.restroomGenderFilter) {
+            RestroomGender.FEMALE -> isFemale
+            RestroomGender.MALE -> isMale
+            RestroomGender.ANY -> true
+        }
+    } else true
+    chipOk && dropdownOk && accessOk && genderOk
+}
 
 class NavigationViewModel : ViewModel() {
 
@@ -62,6 +94,98 @@ class NavigationViewModel : ViewModel() {
         }
     }
 
+    fun loadAmenities() {
+        viewModelScope.launch {
+            try {
+                val response = api.getAmenities()
+                _state.value = _state.value.copy(amenities = response.amenities)
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(error = "Failed to load amenities: ${e.message}")
+            }
+        }
+    }
+
+    // ── Selection + filter toggles ─────────────────────────────────
+
+    fun selectAmenity(amenity: Amenity) {
+        _state.value = _state.value.copy(selectedAmenity = amenity)
+    }
+
+    fun clearSelectedAmenity() {
+        _state.value = _state.value.copy(selectedAmenity = null)
+    }
+
+    fun toggleAccessibilityMode() {
+        _state.value = _state.value.copy(accessibilityMode = !_state.value.accessibilityMode)
+    }
+
+    fun setTypeFilter(type: String, enabled: Boolean) {
+        val updated = _state.value.activeTypeFilters.toMutableSet().apply {
+            if (enabled) add(type) else remove(type)
+        }
+        _state.value = _state.value.copy(activeTypeFilters = updated)
+    }
+
+    fun toggleAmenityList() {
+        _state.value = _state.value.copy(showAmenityList = !_state.value.showAmenityList)
+    }
+
+    fun setDropdownTypeFilter(type: String?) {
+        val current = _state.value
+        // Reset gender sub-filter when the type changes (or is cleared)
+        val resetGender = current.dropdownTypeFilter != type
+        _state.value = current.copy(
+            dropdownTypeFilter = type,
+            restroomGenderFilter = if (resetGender) RestroomGender.ANY else current.restroomGenderFilter
+        )
+    }
+
+    fun setRestroomGender(gender: RestroomGender) {
+        _state.value = _state.value.copy(restroomGenderFilter = gender)
+    }
+
+    /**
+     * Route to the nearest amenity matching the current dropdown filter context
+     * (type + gender + accessibility). Picks closest by haversine to user location.
+     */
+    fun routeToNearestFilteredRestroom() {
+        val state = _state.value
+        val user = state.userLocation ?: return
+        val candidates = filteredAmenities(state)
+        if (candidates.isEmpty()) {
+            _state.value = state.copy(error = "No matching restrooms found.")
+            return
+        }
+        val closest = candidates.minByOrNull {
+            haversineMeters(user, LatLng(it.latitude, it.longitude))
+        } ?: return
+        routeToSpecificAmenity(closest)
+    }
+
+    fun routeToSpecificAmenity(amenity: Amenity) {
+        val currentLocation = _state.value.userLocation ?: return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(isLoading = true, error = null)
+            try {
+                val nearest = api.getNearestNode(
+                    currentLocation.latitude, currentLocation.longitude, _state.value.currentZone
+                )
+                _state.value = _state.value.copy(currentZone = nearest.zone)
+                // /api/amenities now returns the linked nav_node's lat/lng, so
+                // amenity.nodeid is authoritative and lives in the same frame as
+                // the marker we just drew.
+                val response = api.getRoute(nearest.node_id, amenity.nodeid)
+                // Preserve the chosen amenity's name as the destination label
+                applyRouteResponse(response.copy(destination_name = amenity.name))
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(
+                    isLoading = false,
+                    error = "Failed to route to ${amenity.name}: ${e.message}"
+                )
+            }
+        }
+    }
+
     // ── Route to specific amenity type ─────────────────────────────
 
     fun routeToAmenity(amenityType: String) {
@@ -76,8 +200,18 @@ class NavigationViewModel : ViewModel() {
                 // Remember this node's zone so off-path recalcs stay airside/landside-correct
                 _state.value = _state.value.copy(currentZone = nearest.zone)
                 // Then route to nearest amenity of that type
-                val response = api.getRouteToAmenity(nearest.node_id, amenityType)
+                val accessible = _state.value.accessibilityMode
+                val response = api.getRouteToAmenity(
+                    nearest.node_id, amenityType, if (accessible) true else null
+                )
                 applyRouteResponse(response)
+            } catch (e: retrofit2.HttpException) {
+                val body = try { e.response()?.errorBody()?.string() } catch (_: Exception) { null }
+                val msg = body ?: e.message ?: "Request failed"
+                val friendly = if (e.code() == 404 && _state.value.accessibilityMode) {
+                    "No accessible $amenityType found near you. Try turning off accessibility mode."
+                } else msg
+                _state.value = _state.value.copy(isLoading = false, error = friendly)
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
                     isLoading = false,
@@ -244,6 +378,11 @@ class NavigationViewModel : ViewModel() {
     // ── Location update (used by real GPS if ever connected) ───────
 
     fun updateUserLocation(location: LatLng) {
+        // Don't let real GPS overwrite the simulated position while a
+        // simulation is running — otherwise the camera jumps to the
+        // device's physical location every fix and snaps back on the
+        // next simulated step.
+        if (_state.value.isSimulating) return
         _state.value = _state.value.copy(userLocation = location)
 
         if (_state.value.isNavigating && !_state.value.isSimulating && _state.value.waypoints.isNotEmpty()) {
@@ -293,7 +432,14 @@ class NavigationViewModel : ViewModel() {
 
     fun stopNavigation() {
         stopSimulation()
-        _state.value = NavigationState(amenityTypes = _state.value.amenityTypes)
+        val prev = _state.value
+        _state.value = NavigationState(
+            amenityTypes = prev.amenityTypes,
+            amenities = prev.amenities,
+            accessibilityMode = prev.accessibilityMode,
+            activeTypeFilters = prev.activeTypeFilters,
+            userLocation = prev.userLocation
+        )
     }
 
     fun setMockLocation() {
@@ -310,7 +456,7 @@ class NavigationViewModel : ViewModel() {
         return Math.sqrt(dlat * dlat + dlng * dlng)
     }
 
-    private fun pointToSegmentDistanceMeters(p: LatLng, a: LatLng, b: LatLng): Double {
+    internal fun pointToSegmentDistanceMeters(p: LatLng, a: LatLng, b: LatLng): Double {
         // Project point p onto segment a-b, compute haversine distance to closest point
         val dx = b.longitude - a.longitude
         val dy = b.latitude - a.latitude

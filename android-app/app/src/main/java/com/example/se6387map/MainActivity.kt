@@ -8,8 +8,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.background
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -34,6 +39,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private var locationCallback: LocationCallback? = null
+    internal var latestViewModel: NavigationViewModel? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,6 +57,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 val viewModel: NavigationViewModel = viewModel()
+                latestViewModel = viewModel
 
                 LaunchedEffect(Unit) {
                     if (ActivityCompat.checkSelfPermission(
@@ -70,6 +77,7 @@ class MainActivity : ComponentActivity() {
 
                     viewModel.setMockLocation()
                     viewModel.loadAmenityTypes()
+                    viewModel.loadAmenities()
                 }
 
                 NavigationScreen(viewModel = viewModel)
@@ -85,7 +93,7 @@ class MainActivity : ComponentActivity() {
         locationCallback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
                 result.lastLocation?.let {
-                    // Placeholder for real GPS integration
+                    latestViewModel?.updateUserLocation(LatLng(it.latitude, it.longitude))
                 }
             }
         }
@@ -159,6 +167,31 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                     state = endMarkerState,
                     title = state.destinationName ?: "Destination",
                     icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
+                )
+            }
+
+            // Amenity markers (filtered)
+            val visibleAmenities = filteredAmenities(state)
+            visibleAmenities.forEach { amenity ->
+                val hue = when (amenity.status.lowercase()) {
+                    "open" -> BitmapDescriptorFactory.HUE_GREEN
+                    "closed" -> BitmapDescriptorFactory.HUE_VIOLET
+                    "maintenance", "cleaning" -> BitmapDescriptorFactory.HUE_ORANGE
+                    else -> BitmapDescriptorFactory.HUE_YELLOW
+                }
+                val markerState = rememberMarkerState(
+                    key = "amenity-${amenity.id}",
+                    position = LatLng(amenity.latitude, amenity.longitude)
+                )
+                Marker(
+                    state = markerState,
+                    title = amenity.name,
+                    snippet = "${amenity.type} · ${amenity.status}",
+                    icon = BitmapDescriptorFactory.defaultMarker(hue),
+                    onClick = {
+                        viewModel.selectAmenity(amenity)
+                        true
+                    }
                 )
             }
 
@@ -262,6 +295,27 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
             }
         }
 
+        // ── Amenity detail bottom sheet ────────────────────────────
+        state.selectedAmenity?.let { amenity ->
+            AmenityDetailSheet(
+                amenity = amenity,
+                onRouteHere = {
+                    viewModel.routeToSpecificAmenity(amenity)
+                    viewModel.clearSelectedAmenity()
+                },
+                onClose = { viewModel.clearSelectedAmenity() }
+            )
+        }
+
+        // ── Browse amenities bottom sheet ──────────────────────────
+        if (state.showAmenityList) {
+            AmenityListSheet(
+                amenities = filteredAmenities(state),
+                onSelect = { viewModel.selectAmenity(it); viewModel.toggleAmenityList() },
+                onDismiss = { viewModel.toggleAmenityList() }
+            )
+        }
+
         // ── Bottom control panel ───────────────────────────────────
         Card(
             modifier = Modifier
@@ -297,14 +351,75 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                         modifier = Modifier.padding(bottom = 12.dp)
                     )
 
-                    // Amenity type dropdown
+                    // Filters section
+                    FiltersSection(state = state, viewModel = viewModel)
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Amenity type dropdown (filters the map to a single type)
                     if (state.amenityTypes.isNotEmpty()) {
                         AmenityDropdown(
                             amenityTypes = state.amenityTypes,
-                            onSelect = { viewModel.routeToAmenity(it) }
+                            selected = state.dropdownTypeFilter,
+                            onSelect = { viewModel.setDropdownTypeFilter(it) },
+                            onClear = { viewModel.setDropdownTypeFilter(null) }
                         )
                         Spacer(modifier = Modifier.height(8.dp))
+
+                        // Restroom gender sub-filter
+                        if (state.dropdownTypeFilter == "restroom") {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                FilterChip(
+                                    selected = state.restroomGenderFilter == RestroomGender.ANY,
+                                    onClick = { viewModel.setRestroomGender(RestroomGender.ANY) },
+                                    label = { Text("Any") }
+                                )
+                                FilterChip(
+                                    selected = state.restroomGenderFilter == RestroomGender.MALE,
+                                    onClick = { viewModel.setRestroomGender(RestroomGender.MALE) },
+                                    label = { Text("Male") }
+                                )
+                                FilterChip(
+                                    selected = state.restroomGenderFilter == RestroomGender.FEMALE,
+                                    onClick = { viewModel.setRestroomGender(RestroomGender.FEMALE) },
+                                    label = { Text("Female") }
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+
+                        // Route-to-nearest button (only when a type is selected)
+                        if (state.dropdownTypeFilter != null) {
+                            Button(
+                                onClick = {
+                                    val type = state.dropdownTypeFilter
+                                    if (type == "restroom" &&
+                                        state.restroomGenderFilter != RestroomGender.ANY
+                                    ) {
+                                        viewModel.routeToNearestFilteredRestroom()
+                                    } else if (type != null) {
+                                        viewModel.routeToAmenity(type)
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A73E8))
+                            ) {
+                                Text("Route to nearest", fontSize = 16.sp)
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
                     }
+
+                    Button(
+                        onClick = { viewModel.toggleAmenityList() },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF34A853))
+                    ) {
+                        Text("Browse Amenities", fontSize = 16.sp)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
 
                     // Demo route button
                     Button(
@@ -376,16 +491,22 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AmenityDropdown(amenityTypes: List<String>, onSelect: (String) -> Unit) {
+fun AmenityDropdown(
+    amenityTypes: List<String>,
+    selected: String?,
+    onSelect: (String) -> Unit,
+    onClear: () -> Unit
+) {
     var expanded by remember { mutableStateOf(false) }
-    var selectedText by remember { mutableStateOf("Select amenity type...") }
+    val displayText = selected?.replaceFirstChar { it.uppercase() }
+        ?: "Select amenity type..."
 
     ExposedDropdownMenuBox(
         expanded = expanded,
         onExpandedChange = { expanded = !expanded }
     ) {
         OutlinedTextField(
-            value = selectedText,
+            value = displayText,
             onValueChange = {},
             readOnly = true,
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
@@ -397,16 +518,183 @@ fun AmenityDropdown(amenityTypes: List<String>, onSelect: (String) -> Unit) {
             expanded = expanded,
             onDismissRequest = { expanded = false }
         ) {
+            DropdownMenuItem(
+                text = { Text("Clear filter", fontWeight = FontWeight.Bold) },
+                onClick = {
+                    expanded = false
+                    onClear()
+                }
+            )
             amenityTypes.forEach { type ->
                 DropdownMenuItem(
                     text = { Text(type.replaceFirstChar { it.uppercase() }) },
                     onClick = {
-                        selectedText = type.replaceFirstChar { it.uppercase() }
                         expanded = false
                         onSelect(type)
                     }
                 )
             }
+        }
+    }
+}
+
+// ── Filters section ────────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+fun FiltersSection(state: NavigationState, viewModel: NavigationViewModel) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = if (expanded) "▼ Filters" else "▶ Filters",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold
+            )
+            val active = listOfNotNull(
+                if (state.accessibilityMode) "♿" else null,
+                if (state.activeTypeFilters.isNotEmpty()) "${state.activeTypeFilters.size} types" else null
+            ).joinToString(" · ")
+            if (active.isNotEmpty()) {
+                Text(text = active, fontSize = 12.sp, color = Color.Gray)
+            }
+        }
+
+        if (expanded) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Switch(
+                    checked = state.accessibilityMode,
+                    onCheckedChange = { viewModel.toggleAccessibilityMode() }
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Wheelchair accessible only", fontSize = 14.sp)
+            }
+
+            if (state.amenityTypes.isNotEmpty()) {
+                androidx.compose.foundation.layout.FlowRow(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    state.amenityTypes.forEach { type ->
+                        val selected = type in state.activeTypeFilters
+                        FilterChip(
+                            selected = selected,
+                            onClick = { viewModel.setTypeFilter(type, !selected) },
+                            label = { Text(type.replaceFirstChar { it.uppercase() }, fontSize = 12.sp) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Amenity detail sheet ───────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AmenityDetailSheet(amenity: Amenity, onRouteHere: () -> Unit, onClose: () -> Unit) {
+    val isAccessible = amenity.has_accessible_unit == true ||
+        amenity.wheelchairaccessible.equals("yes", ignoreCase = true)
+
+    ModalBottomSheet(onDismissRequest = onClose) {
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(amenity.name, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(amenity.type.replaceFirstChar { it.uppercase() }, fontSize = 14.sp, color = Color.Gray)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("Status: ${amenity.status}", fontSize = 14.sp)
+            Text(
+                text = if (isAccessible) "♿ Wheelchair accessible" else "Not wheelchair accessible",
+                fontSize = 14.sp,
+                color = if (isAccessible) Color(0xFF2E7D32) else Color.Gray
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onRouteHere,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A73E8))
+                ) { Text("Route Here") }
+                OutlinedButton(
+                    onClick = onClose,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Close") }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+    }
+}
+
+// ── Amenity list sheet ─────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AmenityListSheet(
+    amenities: List<Amenity>,
+    onSelect: (Amenity) -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+            Text(
+                "Amenities (${amenities.size})",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
+                items(amenities, key = { it.id }) { amenity ->
+                    val isAccessible = amenity.has_accessible_unit == true ||
+                        amenity.wheelchairaccessible.equals("yes", ignoreCase = true)
+                    val statusColor = when (amenity.status.lowercase()) {
+                        "open" -> Color(0xFF34A853)
+                        "closed" -> Color(0xFF9E9E9E)
+                        "maintenance", "cleaning" -> Color(0xFFFF9800)
+                        else -> Color(0xFFFFC107)
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelect(amenity) }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .background(statusColor, CircleShape)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(amenity.name, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                            Text(
+                                "${amenity.type} · ${amenity.status}",
+                                fontSize = 12.sp,
+                                color = Color.Gray
+                            )
+                        }
+                        if (isAccessible) {
+                            Text("♿", fontSize = 18.sp)
+                        }
+                    }
+                    HorizontalDivider()
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }

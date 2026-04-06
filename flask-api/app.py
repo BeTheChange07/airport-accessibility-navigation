@@ -449,19 +449,40 @@ def get_edges():
 
 @app.route('/api/amenities', methods=['GET'])
 def get_amenities():
-    """Return all amenities for visualization."""
+    """Return all amenities for visualization.
+
+    Each amenity also includes `has_accessible_unit` so the client can filter
+    by accessibility without a second round trip. Build 1: the amenityUnits
+    table is empty, so this is computed directly from a.wheelchairaccessible.
+    """
     try:
         c = databaseConnection.cursor()
+        # Return the LINKED nav_node's lat/lng (calibrated frame), not the
+        # raw CSV lat/lng on the amenities row. The client uses these coords
+        # for marker placement AND routing snaps to amenity.nodeid, so both
+        # must live in the same coordinate frame as nav_nodes. Fall back to
+        # the raw amenity coords if the linkage is somehow missing.
         c.execute("""
-            SELECT a.id, a.nodeid, a.name, a.type, a.latitude, a.longitude,
-                   a.status, a.wheelchairaccessible
+            SELECT a.id,
+                   a.nodeid,
+                   a.name,
+                   a.type,
+                   COALESCE(n.lat, a.latitude)  AS latitude,
+                   COALESCE(n.lng, a.longitude) AS longitude,
+                   a.status,
+                   a.wheelchairaccessible,
+                   (LOWER(COALESCE(a.wheelchairaccessible, '')) = 'yes') AS has_accessible_unit
             FROM amenities a
+            LEFT JOIN nav_nodes n ON n.id = a.nodeid
             ORDER BY a.type, a.name
         """)
         amenities = c.fetchall()
         c.close()
         return jsonify({'amenities': list(amenities)})
     except Exception as e:
+        import traceback
+        traceback.print_exc()
+        databaseConnection.rollback()
         return jsonify({'error': str(e)}), 500
 
 
@@ -492,6 +513,8 @@ def route_to_amenity():
     """
     from_node = request.args.get('from_node', type=int)
     amenity_type = request.args.get('amenity_type', type=str)
+    accessible_param = request.args.get('accessible', type=str)
+    accessible = str(accessible_param).lower() in ('1', 'true', 'yes') if accessible_param else False
 
     if from_node is None or not amenity_type:
         return jsonify({'error': 'from_node and amenity_type are required'}), 400
@@ -508,19 +531,37 @@ def route_to_amenity():
         # Get all amenities of the requested type whose linked nav_node is in the
         # SAME zone as the starting node. Secure-side users can only reach secure
         # amenities; public-side users can only reach public ones.
-        cur.execute("""
-            SELECT a.id AS amenity_id, a.nodeID, a.name, a.type,
-                   a.latitude, a.longitude, n.zone AS node_zone
-            FROM amenities a
-            JOIN nav_nodes n ON n.id = a.nodeID
-            WHERE a.type = %s AND COALESCE(n.zone, 'public') = %s
-        """, (amenity_type, start_zone))
-        candidates = cur.fetchall()
+        if accessible:
+            # Build 1: amenityUnits table is empty, so filter directly by the
+            # amenity-level accessibility flag.
+            cur.execute("""
+                SELECT a.id AS amenity_id, a.nodeID, a.name, a.type,
+                       a.latitude, a.longitude, n.zone AS node_zone
+                FROM amenities a
+                JOIN nav_nodes n ON n.id = a.nodeID
+                WHERE a.type = %s AND COALESCE(n.zone, 'public') = %s
+                  AND LOWER(COALESCE(a.wheelchairaccessible, '')) = 'yes'
+            """, (amenity_type, start_zone))
+            candidates = cur.fetchall()
 
-        if not candidates:
-            return jsonify({
-                'error': f'No {amenity_type} amenities reachable from your zone ({start_zone})'
-            }), 404
+            if not candidates:
+                return jsonify({
+                    'error': f'No accessible {amenity_type} reachable from your zone ({start_zone})'
+                }), 404
+        else:
+            cur.execute("""
+                SELECT a.id AS amenity_id, a.nodeID, a.name, a.type,
+                       a.latitude, a.longitude, n.zone AS node_zone
+                FROM amenities a
+                JOIN nav_nodes n ON n.id = a.nodeID
+                WHERE a.type = %s AND COALESCE(n.zone, 'public') = %s
+            """, (amenity_type, start_zone))
+            candidates = cur.fetchall()
+
+            if not candidates:
+                return jsonify({
+                    'error': f'No {amenity_type} amenities reachable from your zone ({start_zone})'
+                }), 404
 
         # Sort candidates by straight-line distance (nearest first)
         candidates.sort(key=lambda c: haversine_distance_meters(
@@ -612,6 +653,7 @@ def route_to_amenity():
         })
 
     except Exception as e:
+        databaseConnection.rollback()
         return jsonify({'error': str(e)}), 500
 
 
