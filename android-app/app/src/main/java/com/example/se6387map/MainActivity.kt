@@ -173,26 +173,29 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
             // Amenity markers (filtered)
             val visibleAmenities = filteredAmenities(state)
             visibleAmenities.forEach { amenity ->
-                val hue = when (amenity.status.lowercase()) {
-                    "open" -> BitmapDescriptorFactory.HUE_GREEN
-                    "closed" -> BitmapDescriptorFactory.HUE_VIOLET
-                    "maintenance", "cleaning" -> BitmapDescriptorFactory.HUE_ORANGE
-                    else -> BitmapDescriptorFactory.HUE_YELLOW
-                }
-                val markerState = rememberMarkerState(
-                    key = "amenity-${amenity.id}",
-                    position = LatLng(amenity.latitude, amenity.longitude)
-                )
-                Marker(
-                    state = markerState,
-                    title = amenity.name,
-                    snippet = "${amenity.type} · ${amenity.status}",
-                    icon = BitmapDescriptorFactory.defaultMarker(hue),
-                    onClick = {
-                        viewModel.selectAmenity(amenity)
-                        true
+                key(amenity.id) {
+                    val hue = when (amenity.status.lowercase()) {
+                        "open" -> BitmapDescriptorFactory.HUE_GREEN
+                        "closed" -> BitmapDescriptorFactory.HUE_VIOLET
+                        "maintenance", "cleaning" -> BitmapDescriptorFactory.HUE_ORANGE
+                        else -> BitmapDescriptorFactory.HUE_YELLOW
                     }
-                )
+                    val pos = LatLng(amenity.latitude, amenity.longitude)
+                    val markerState = rememberMarkerState(position = pos)
+                    // rememberMarkerState's `position` is initial-only; force-sync it
+                    // each recomposition so filtering doesn't leave a stale LatLng behind.
+                    markerState.position = pos
+                    Marker(
+                        state = markerState,
+                        title = amenity.name,
+                        snippet = "${amenity.type} · ${amenity.status}",
+                        icon = BitmapDescriptorFactory.defaultMarker(hue),
+                        onClick = {
+                            viewModel.selectAmenity(amenity)
+                            true
+                        }
+                    )
+                }
             }
 
             // User position marker (pulsing dot simulated with a circle + marker)

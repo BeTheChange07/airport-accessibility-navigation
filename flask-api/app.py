@@ -536,7 +536,9 @@ def route_to_amenity():
             # amenity-level accessibility flag.
             cur.execute("""
                 SELECT a.id AS amenity_id, a.nodeID, a.name, a.type,
-                       a.latitude, a.longitude, n.zone AS node_zone
+                       a.latitude, a.longitude,
+                       n.lat AS node_lat, n.lng AS node_lng,
+                       n.zone AS node_zone
                 FROM amenities a
                 JOIN nav_nodes n ON n.id = a.nodeID
                 WHERE a.type = %s AND COALESCE(n.zone, 'public') = %s
@@ -551,7 +553,9 @@ def route_to_amenity():
         else:
             cur.execute("""
                 SELECT a.id AS amenity_id, a.nodeID, a.name, a.type,
-                       a.latitude, a.longitude, n.zone AS node_zone
+                       a.latitude, a.longitude,
+                       n.lat AS node_lat, n.lng AS node_lng,
+                       n.zone AS node_zone
                 FROM amenities a
                 JOIN nav_nodes n ON n.id = a.nodeID
                 WHERE a.type = %s AND COALESCE(n.zone, 'public') = %s
@@ -563,9 +567,13 @@ def route_to_amenity():
                     'error': f'No {amenity_type} amenities reachable from your zone ({start_zone})'
                 }), 404
 
-        # Sort candidates by straight-line distance (nearest first)
+        # Sort candidates by straight-line distance (nearest first).
+        # Use the LINKED nav_node's lat/lng, not the raw amenity row's
+        # lat/lng — routing operates in the nav_node frame, so the sort
+        # must too. Mixing frames here used to pick a "nearest" amenity
+        # whose nodeid then routed to a completely different spot.
         candidates.sort(key=lambda c: haversine_distance_meters(
-            start['lat'], start['lng'], c['latitude'], c['longitude']
+            start['lat'], start['lng'], c['node_lat'], c['node_lng']
         ))
 
         # Try each candidate until we find one that is routable

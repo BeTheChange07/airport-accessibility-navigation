@@ -100,6 +100,8 @@
   .mode-btn.mode-erase.active .dot { background: #ff6060; }
   .mode-btn.mode-lasso.active { background: rgba(255,107,53,0.08); border-color: var(--accent2); color: var(--accent2); }
   .mode-btn.mode-lasso.active .dot { background: var(--accent2); }
+  .mode-btn.mode-zone.active { background: rgba(255,200,0,0.08); border-color: #ffc800; color: #ffc800; }
+  .mode-btn.mode-zone.active .dot { background: #ffc800; }
 
   .type-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
   .type-btn {
@@ -278,6 +280,17 @@
   }
   .grid-note .hi { color: var(--accent); }
   .grid-note .ok { color: var(--accent3); }
+
+  #save-indicator {
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    transition: all 0.3s;
+    white-space: nowrap;
+  }
+  #save-indicator.saved { color: var(--accent3); }
+  #save-indicator.saving { color: var(--accent); }
+  #save-indicator.none { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -286,8 +299,10 @@
   <h1>NavEdit</h1>
   <span class="sub">Terminal D &mdash; Node Graph Editor</span>
   <div class="header-right">
+    <span id="save-indicator" class="none"></span>
     <div class="stat" id="stat-nodes">Nodes: <span>0</span></div>
     <div class="stat" id="stat-edges">Edges: <span>0</span></div>
+    <div class="stat" id="stat-undo">Undo: <span>0</span>/<span>0</span></div>
     <div class="stat">Zoom: <span id="zoom-val">100</span>%</div>
   </div>
 </header>
@@ -303,6 +318,22 @@
         <div>&#x1F5BC; Click to load PNG map</div>
       </label>
       <button class="action-btn btn-danger" id="clear-map-btn" style="display:none">Remove Map</button>
+      <div id="map-offset-controls" style="display:none;margin-top:8px">
+        <h2 style="font-family:'Syne',sans-serif;font-size:10px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);margin-bottom:8px">Shift Map Image</h2>
+        <div class="setting-row">
+          <label>Offset X</label>
+          <input type="number" id="map-offset-x" value="0" step="1">
+        </div>
+        <div class="setting-row">
+          <label>Offset Y</label>
+          <input type="number" id="map-offset-y" value="0" step="1">
+        </div>
+        <div class="setting-row">
+          <label>Scale %</label>
+          <input type="number" id="map-scale" value="100" min="10" max="500" step="1">
+        </div>
+        <div class="grid-note">Arrow keys shift by 1px (hold Shift for 10px). Adjust scale to fit.</div>
+      </div>
     </div>
 
     <!-- AUTO GRID -->
@@ -346,6 +377,9 @@
       <button class="mode-btn" data-mode="delete">
         <span class="dot"></span> Click Delete <span class="key">D</span>
       </button>
+      <button class="mode-btn mode-zone" data-mode="zone">
+        <span class="dot"></span> Zone Paint <span class="key">Z</span>
+      </button>
     </div>
 
     <!-- ERASE BRUSH -->
@@ -355,6 +389,23 @@
         <label>Brush radius</label>
         <input type="number" id="erase-radius" value="30" min="5" max="300">
       </div>
+    </div>
+
+    <!-- ZONE PAINT SETTINGS -->
+    <div class="sidebar-section" id="zone-settings" style="display:none">
+      <h2 style="color:#ffc800!important">Zone Paint Brush</h2>
+      <div class="setting-row">
+        <label>Brush radius</label>
+        <input type="number" id="zone-radius" value="40" min="5" max="300">
+      </div>
+      <div class="setting-row">
+        <label>Paint zone</label>
+      </div>
+      <div style="display:flex;gap:4px;margin-bottom:8px">
+        <button class="action-btn btn-primary zone-paint-btn active" data-zone="public" style="background:rgba(0,212,255,0.15);border-color:var(--accent);font-size:10px;padding:5px">Public</button>
+        <button class="action-btn zone-paint-btn" data-zone="secure" style="background:rgba(255,200,0,0.08);border-color:#ffc800;color:#ffc800;font-size:10px;padding:5px">Secure</button>
+      </div>
+      <div class="grid-note">Drag over nodes to tag them. <span style="color:var(--accent)">Blue</span> = public, <span style="color:#ffc800">Gold</span> = secure (past TSA).</div>
     </div>
 
     <!-- NODE TYPE -->
@@ -367,6 +418,16 @@
         <button class="type-btn" data-type="elevator">elevator</button>
         <button class="type-btn" data-type="escalator">escalator</button>
         <button class="type-btn" data-type="exit">exit</button>
+        <button class="type-btn" data-type="checkpoint">checkpoint</button>
+      </div>
+    </div>
+
+    <!-- ZONE (placement default) -->
+    <div class="sidebar-section">
+      <h2>Zone (placement)</h2>
+      <div style="display:flex;gap:4px;">
+        <button class="type-btn active" data-zone-default="public" id="zone-default-public" style="flex:1">public</button>
+        <button class="type-btn" data-zone-default="secure" id="zone-default-secure" style="flex:1">secure</button>
       </div>
     </div>
 
@@ -391,10 +452,55 @@
       </div>
     </div>
 
+    <!-- GEOREF ANCHORS -->
+    <div class="sidebar-section" style="background:rgba(127,255,107,0.025)">
+      <h2 style="color:var(--accent3)!important">&#x1F30D; Geo-Reference (3 pts)</h2>
+      <div class="grid-note" style="margin-bottom:8px">Pick 3 points on the map with known lat/lng. All node positions will be interpolated via affine transform.</div>
+      <div id="geo-anchors">
+        <div class="geo-anchor-row" data-idx="0">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+            <span class="geo-dot" style="width:10px;height:10px;border-radius:50%;background:#ff3366;display:inline-block;flex-shrink:0"></span>
+            <span style="font-size:11px;color:var(--text);flex:1">Anchor 1: <span class="geo-node-label" style="color:var(--accent)">none</span></span>
+            <button class="action-btn btn-danger geo-pick-btn" data-idx="0" style="width:auto;padding:3px 8px;margin:0;font-size:10px">Pick</button>
+          </div>
+          <div style="display:flex;gap:4px;margin-bottom:6px">
+            <input type="text" class="geo-lat" data-idx="0" placeholder="Latitude" style="width:50%;margin:0;font-size:10px">
+            <input type="text" class="geo-lng" data-idx="0" placeholder="Longitude" style="width:50%;margin:0;font-size:10px">
+          </div>
+        </div>
+        <div class="geo-anchor-row" data-idx="1">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+            <span class="geo-dot" style="width:10px;height:10px;border-radius:50%;background:#33ff66;display:inline-block;flex-shrink:0"></span>
+            <span style="font-size:11px;color:var(--text);flex:1">Anchor 2: <span class="geo-node-label" style="color:var(--accent)">none</span></span>
+            <button class="action-btn btn-danger geo-pick-btn" data-idx="1" style="width:auto;padding:3px 8px;margin:0;font-size:10px">Pick</button>
+          </div>
+          <div style="display:flex;gap:4px;margin-bottom:6px">
+            <input type="text" class="geo-lat" data-idx="1" placeholder="Latitude" style="width:50%;margin:0;font-size:10px">
+            <input type="text" class="geo-lng" data-idx="1" placeholder="Longitude" style="width:50%;margin:0;font-size:10px">
+          </div>
+        </div>
+        <div class="geo-anchor-row" data-idx="2">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+            <span class="geo-dot" style="width:10px;height:10px;border-radius:50%;background:#3366ff;display:inline-block;flex-shrink:0"></span>
+            <span style="font-size:11px;color:var(--text);flex:1">Anchor 3: <span class="geo-node-label" style="color:var(--accent)">none</span></span>
+            <button class="action-btn btn-danger geo-pick-btn" data-idx="2" style="width:auto;padding:3px 8px;margin:0;font-size:10px">Pick</button>
+          </div>
+          <div style="display:flex;gap:4px;margin-bottom:6px">
+            <input type="text" class="geo-lat" data-idx="2" placeholder="Latitude" style="width:50%;margin:0;font-size:10px">
+            <input type="text" class="geo-lng" data-idx="2" placeholder="Longitude" style="width:50%;margin:0;font-size:10px">
+          </div>
+        </div>
+      </div>
+      <button class="action-btn btn-success" id="compute-geo-btn" style="margin-top:4px">Compute All Lat/Lng</button>
+      <button class="action-btn btn-orange" id="clear-geo-btn" style="margin-top:2px">Clear Anchors</button>
+      <div id="geo-status" class="grid-note" style="margin-top:6px"></div>
+    </div>
+
     <!-- SELECTED NODE -->
     <div class="node-detail" id="node-detail">
       <h2>&#x25A3; Selected Node</h2>
       <div class="node-meta" id="node-meta"></div>
+      <div class="node-meta" id="node-geo" style="display:none;color:var(--accent3)"></div>
       <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Label</label>
       <input type="text" id="node-label-input" placeholder="Gate D14, Restroom, etc.">
       <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Type</label>
@@ -405,6 +511,12 @@
         <button class="type-btn" data-type="elevator">elevator</button>
         <button class="type-btn" data-type="escalator">escalator</button>
         <button class="type-btn" data-type="exit">exit</button>
+        <button class="type-btn" data-type="checkpoint">checkpoint</button>
+      </div>
+      <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Zone</label>
+      <div style="display:flex;gap:4px;margin-bottom:8px">
+        <button class="type-btn node-zone-btn" data-zone="public" style="flex:1">public</button>
+        <button class="type-btn node-zone-btn" data-zone="secure" style="flex:1">secure</button>
       </div>
       <button class="action-btn btn-danger" id="delete-selected-btn">Delete Selected</button>
     </div>
@@ -418,15 +530,31 @@
       <button class="action-btn btn-danger" id="clear-all-btn">Clear All Nodes</button>
     </div>
 
+    <!-- SAVE / LOAD -->
+    <div class="sidebar-section">
+      <h2>Session Save</h2>
+      <div class="grid-note" style="margin-bottom:6px">Auto-saves to browser every 2s. Ctrl+Z/Y for undo/redo.</div>
+      <button class="action-btn btn-primary" id="save-now-btn">Save Now</button>
+      <button class="action-btn btn-danger" id="clear-save-btn">Clear Saved Data</button>
+    </div>
+
     <!-- LEGEND -->
     <div class="sidebar-section">
       <h2>Legend</h2>
       <div style="font-size:10px;line-height:2;color:var(--muted)">
-        <div><span style="color:var(--accent)">&#11044;</span> waypoint</div>
+        <div style="font-size:9px;color:var(--accent);margin-bottom:2px;font-weight:700">PUBLIC (cool)</div>
+        <div><span style="color:#00d4ff">&#11044;</span> waypoint</div>
         <div><span style="color:#a78bfa">&#11044;</span> gate</div>
-        <div><span style="color:var(--accent3)">&#11044;</span> amenity</div>
+        <div><span style="color:#7fff6b">&#11044;</span> amenity</div>
         <div><span style="color:#fbbf24">&#11044;</span> elevator / escalator</div>
-        <div><span style="color:var(--accent2)">&#11044;</span> exit / selected</div>
+        <div><span style="color:#ff6b35">&#11044;</span> exit</div>
+        <div style="font-size:9px;color:#ffc800;margin-top:6px;margin-bottom:2px;font-weight:700">SECURE (warm)</div>
+        <div><span style="color:#ffc800">&#11044;</span> waypoint</div>
+        <div><span style="color:#ff9f43">&#11044;</span> gate</div>
+        <div><span style="color:#ffda6b">&#11044;</span> amenity</div>
+        <div><span style="color:#ff8c00">&#11044;</span> elevator / escalator</div>
+        <div><span style="color:#ff5252">&#11044;</span> exit</div>
+        <div style="margin-top:6px"><span style="color:#ff3399">&#11044;</span> checkpoint (TSA)</div>
       </div>
     </div>
 
@@ -444,7 +572,7 @@
 <div class="bottombar">
   <div>x: <span id="coord-x" style="color:var(--accent)">0</span> &nbsp; y: <span id="coord-y" style="color:var(--accent)">0</span></div>
   <div id="mode-hint" style="color:var(--muted);font-size:10px;margin-left:14px;opacity:0.8"></div>
-  <div class="hint">Scroll=zoom &nbsp;|&nbsp; Alt+drag / middle-click=pan &nbsp;|&nbsp; Del=delete selected</div>
+  <div class="hint">Scroll=zoom | Alt+drag=pan | Ctrl+Z=undo | Ctrl+Y=redo | Del=delete</div>
 </div>
 
 <!-- EXPORT MODAL -->
@@ -498,6 +626,7 @@ const S = {
   panOffset: { x: 0, y: 0 },
   zoom: 1,
   mapImage: null,
+  mapImageDataUrl: null, // for persistence
   edgeRadius: 60,
   showEdges: true,
   showLabels: true,
@@ -506,7 +635,208 @@ const S = {
   lasso: null,
   erasing: false,
   msx: 0, msy: 0,
+  // Zone painting
+  nodeZone: 'public', // default zone for new nodes
+  zonePaintZone: 'public', // which zone the brush paints
+  zoneRadius: 40,
+  zonePainting: false,
+  // Map image offset
+  mapOffsetX: 0,
+  mapOffsetY: 0,
+  mapScale: 100,
+  // Georeferencing
+  geoAnchors: [null, null, null],
+  geoMode: null,
+  affineMatrix: null,
 };
+
+// =========================================================
+// UNDO / REDO
+// =========================================================
+const UNDO_LIMIT = 80;
+let undoStack = [];
+let redoStack = [];
+let _batchingUndo = false; // suppress snapshots during batch ops
+
+function snapshotState() {
+  return JSON.stringify({
+    nodes: S.nodes,
+    edges: S.edges,
+    nextId: S.nextId,
+    geoAnchors: S.geoAnchors,
+    affineMatrix: S.affineMatrix,
+  });
+}
+
+function pushUndo() {
+  if (_batchingUndo) return;
+  const snap = snapshotState();
+  // don't push duplicate
+  if (undoStack.length > 0 && undoStack[undoStack.length - 1] === snap) return;
+  undoStack.push(snap);
+  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+  redoStack = [];
+  updUndoStats();
+  scheduleSave();
+}
+
+function restoreSnapshot(json) {
+  const d = JSON.parse(json);
+  S.nodes = d.nodes;
+  S.edges = d.edges;
+  S.nextId = d.nextId;
+  S.geoAnchors = d.geoAnchors || [null, null, null];
+  S.affineMatrix = d.affineMatrix || null;
+  S.selectedIds.clear();
+  rebuildSpatialIndex();
+  rebuildNodeMap();
+  hideDetail();
+  updStats();
+  updateGeoUI();
+  scheduleRender();
+}
+
+function undo() {
+  if (undoStack.length === 0) return;
+  redoStack.push(snapshotState());
+  restoreSnapshot(undoStack.pop());
+  updUndoStats();
+  scheduleSave();
+}
+
+function redo() {
+  if (redoStack.length === 0) return;
+  undoStack.push(snapshotState());
+  restoreSnapshot(redoStack.pop());
+  updUndoStats();
+  scheduleSave();
+}
+
+function updUndoStats() {
+  const spans = document.querySelectorAll('#stat-undo span');
+  spans[0].textContent = undoStack.length;
+  spans[1].textContent = redoStack.length;
+}
+
+// =========================================================
+// AUTO-SAVE (localStorage)
+// =========================================================
+const SAVE_KEY = 'naveditor_termd_save';
+let saveTimer = null;
+
+function scheduleSave() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(doSave, 2000);
+  showSaveStatus('saving');
+}
+
+function doSave() {
+  try {
+    const payload = {
+      nodes: S.nodes,
+      edges: S.edges,
+      nextId: S.nextId,
+      geoAnchors: S.geoAnchors,
+      affineMatrix: S.affineMatrix,
+      edgeRadius: S.edgeRadius,
+      showEdges: S.showEdges,
+      showLabels: S.showLabels,
+      snap8dir: S.snap8dir,
+      panOffset: S.panOffset,
+      zoom: S.zoom,
+      mapImageDataUrl: S.mapImageDataUrl,
+      mapOffsetX: S.mapOffsetX,
+      mapOffsetY: S.mapOffsetY,
+      mapScale: S.mapScale,
+      savedAt: Date.now(),
+    };
+    const str = JSON.stringify(payload);
+    try {
+      localStorage.setItem(SAVE_KEY, str);
+    } catch (quotaErr) {
+      // Likely QuotaExceededError from large map image, retry without it
+      console.warn('Save too large, retrying without map image');
+      payload.mapImageDataUrl = null;
+      localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
+    }
+    showSaveStatus('saved');
+  } catch (e) {
+    console.warn('Save failed:', e);
+    showSaveStatus('none');
+  }
+}
+
+function loadSave() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return false;
+    const d = JSON.parse(raw);
+    S.nodes = d.nodes || [];
+    S.edges = d.edges || [];
+    S.nextId = d.nextId || 1;
+    S.geoAnchors = d.geoAnchors || [null, null, null];
+    S.affineMatrix = d.affineMatrix || null;
+    S.edgeRadius = d.edgeRadius || 60;
+    S.showEdges = d.showEdges !== false;
+    S.showLabels = d.showLabels !== false;
+    S.snap8dir = d.snap8dir !== false;
+    if (d.panOffset) S.panOffset = d.panOffset;
+    if (d.zoom) S.zoom = d.zoom;
+
+    // Restore settings UI
+    document.getElementById('edge-radius').value = S.edgeRadius;
+    document.getElementById('snap-8dir').checked = S.snap8dir;
+    document.getElementById('show-edges').checked = S.showEdges;
+    document.getElementById('show-labels').checked = S.showLabels;
+
+    // Restore map offset/scale
+    S.mapOffsetX = d.mapOffsetX || 0;
+    S.mapOffsetY = d.mapOffsetY || 0;
+    S.mapScale = d.mapScale || 100;
+    document.getElementById('map-offset-x').value = S.mapOffsetX;
+    document.getElementById('map-offset-y').value = S.mapOffsetY;
+    document.getElementById('map-scale').value = S.mapScale;
+
+    // Restore map image
+    if (d.mapImageDataUrl) {
+      S.mapImageDataUrl = d.mapImageDataUrl;
+      const img = new Image();
+      img.onload = () => { S.mapImage = img; scheduleRender(); document.getElementById('clear-map-btn').style.display='block'; document.getElementById('map-offset-controls').style.display='block'; };
+      img.onerror = () => { console.warn('Failed to restore map image'); S.mapImageDataUrl = null; };
+      img.src = d.mapImageDataUrl;
+    }
+
+    rebuildSpatialIndex();
+    rebuildNodeMap();
+    const ago = d.savedAt ? Math.round((Date.now() - d.savedAt) / 1000) : '?';
+    showSaveStatus('saved');
+    console.log('Restored save from', ago, 'seconds ago:', S.nodes.length, 'nodes');
+    return true;
+  } catch (e) {
+    console.warn('Load failed:', e);
+    return false;
+  }
+}
+
+function showSaveStatus(state) {
+  const el = document.getElementById('save-indicator');
+  el.className = state;
+  if (state === 'saved') el.textContent = 'Saved';
+  else if (state === 'saving') el.textContent = 'Saving...';
+  else el.textContent = '';
+}
+
+window.addEventListener('beforeunload', () => { doSave(); });
+
+document.getElementById('save-now-btn').addEventListener('click', () => {
+  if (saveTimer) clearTimeout(saveTimer);
+  doSave();
+});
+document.getElementById('clear-save-btn').addEventListener('click', () => {
+  if (!confirm('Clear saved data from browser? Your current work stays on screen.')) return;
+  localStorage.removeItem(SAVE_KEY);
+  showSaveStatus('none');
+});
 
 // =========================================================
 // CANVAS
@@ -517,15 +847,85 @@ const ctx = canvas.getContext('2d');
 const brushEl = document.getElementById('brush-indicator');
 const lassoEl = document.getElementById('lasso-box');
 
-function resize() { canvas.width = wrap.clientWidth; canvas.height = wrap.clientHeight; render(); }
+// Render throttle (declared early so resize() can use it)
+let _renderQueued = false;
+function scheduleRender() {
+  if (_renderQueued) return;
+  _renderQueued = true;
+  requestAnimationFrame(() => { _renderQueued = false; render(); });
+}
+
+function resize() { canvas.width = wrap.clientWidth; canvas.height = wrap.clientHeight; scheduleRender(); }
 window.addEventListener('resize', resize);
-resize();
+// Defer initial resize to after all functions are defined
+setTimeout(resize, 0);
 
 function s2w(sx, sy) { return { x: (sx - S.panOffset.x) / S.zoom, y: (sy - S.panOffset.y) / S.zoom }; }
 function w2s(wx, wy) { return { x: wx * S.zoom + S.panOffset.x, y: wy * S.zoom + S.panOffset.y }; }
 
 // =========================================================
-// EDGES
+// SPATIAL INDEX (grid-based for fast lookups)
+// =========================================================
+const CELL_SIZE = 80; // world units per cell
+let spatialGrid = {};
+let nodeMap = {}; // id -> node
+
+function cellKey(x, y) {
+  return (Math.floor(x / CELL_SIZE)) + ',' + (Math.floor(y / CELL_SIZE));
+}
+
+function rebuildSpatialIndex() {
+  spatialGrid = {};
+  for (const n of S.nodes) {
+    const k = cellKey(n.x, n.y);
+    if (!spatialGrid[k]) spatialGrid[k] = [];
+    spatialGrid[k].push(n);
+  }
+}
+
+function rebuildNodeMap() {
+  nodeMap = {};
+  for (const n of S.nodes) nodeMap[n.id] = n;
+}
+
+function addToSpatial(n) {
+  const k = cellKey(n.x, n.y);
+  if (!spatialGrid[k]) spatialGrid[k] = [];
+  spatialGrid[k].push(n);
+  nodeMap[n.id] = n;
+}
+
+function removeFromSpatial(n) {
+  const k = cellKey(n.x, n.y);
+  if (spatialGrid[k]) {
+    spatialGrid[k] = spatialGrid[k].filter(x => x.id !== n.id);
+    if (spatialGrid[k].length === 0) delete spatialGrid[k];
+  }
+  delete nodeMap[n.id];
+}
+
+// Get nodes within radius of a world point
+function nodesNear(wx, wy, radius) {
+  const results = [];
+  const cr = Math.ceil(radius / CELL_SIZE);
+  const cx0 = Math.floor(wx / CELL_SIZE);
+  const cy0 = Math.floor(wy / CELL_SIZE);
+  const r2 = radius * radius;
+  for (let dx = -cr; dx <= cr; dx++) {
+    for (let dy = -cr; dy <= cr; dy++) {
+      const cell = spatialGrid[(cx0 + dx) + ',' + (cy0 + dy)];
+      if (!cell) continue;
+      for (const n of cell) {
+        const ddx = n.x - wx, ddy = n.y - wy;
+        if (ddx * ddx + ddy * ddy <= r2) results.push(n);
+      }
+    }
+  }
+  return results;
+}
+
+// =========================================================
+// EDGES (optimized with spatial index)
 // =========================================================
 const DIRS8 = [
   {dx:0,dy:-1},{dx:1,dy:-1},{dx:1,dy:0},{dx:1,dy:1},
@@ -536,421 +936,805 @@ function getDir(dx,dy){
   const a=(Math.atan2(dy,dx)*180/Math.PI+360)%360;
   return ['E','NE','N','NW','W','SW','S','SE'][Math.round(a/45)%8];
 }
+
 function genEdges() {
-  S.edges=[];
-  const r=S.edgeRadius, ns=S.nodes;
-  for(let i=0;i<ns.length;i++) for(let j=i+1;j<ns.length;j++){
-    const a=ns[i],b=ns[j],dx=b.x-a.x,dy=b.y-a.y,d=Math.sqrt(dx*dx+dy*dy);
-    if(d>r) continue;
-    if(S.snap8dir){
-      const ang=(Math.atan2(dy,dx)*180/Math.PI+360)%360;
-      const ok=DIRS8.some(dir=>adiff(ang,(Math.atan2(dir.dy,dir.dx)*180/Math.PI+360)%360)<=22);
-      if(!ok) continue;
+  S.edges = [];
+  const r = S.edgeRadius;
+  const seen = new Set();
+  for (const n of S.nodes) {
+    const nearby = nodesNear(n.x, n.y, r);
+    for (const m of nearby) {
+      if (m.id <= n.id) continue; // avoid duplicates, one direction
+      const key = n.id < m.id ? n.id + ':' + m.id : m.id + ':' + n.id;
+      if (seen.has(key)) continue;
+      const dx = m.x - n.x, dy = m.y - n.y, d = Math.sqrt(dx * dx + dy * dy);
+      if (d > r || d < 0.01) continue;
+      if (S.snap8dir) {
+        const ang = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
+        const ok = DIRS8.some(dir => adiff(ang, (Math.atan2(dir.dy, dir.dx) * 180 / Math.PI + 360) % 360) <= 22);
+        if (!ok) continue;
+      }
+      seen.add(key);
+      S.edges.push({ from: n.id, to: m.id, distance: Math.round(d * 10) / 10, direction: getDir(dx, dy) });
     }
-    S.edges.push({from:a.id,to:b.id,distance:Math.round(d*10)/10,direction:getDir(dx,dy)});
   }
   updStats();
 }
 
 // =========================================================
-// RENDER
+// RENDER (with viewport culling + rAF throttle)
 // =========================================================
-const TCOLORS={waypoint:'#00d4ff',gate:'#a78bfa',amenity:'#7fff6b',elevator:'#fbbf24',escalator:'#fbbf24',exit:'#ff6b35'};
-function nc(t){return TCOLORS[t]||'#00d4ff';}
+const TCOLORS = { waypoint:'#00d4ff', gate:'#a78bfa', amenity:'#7fff6b', elevator:'#fbbf24', escalator:'#fbbf24', exit:'#ff6b35', checkpoint:'#ff3399' };
+const TCOLORS_SECURE = { waypoint:'#ffc800', gate:'#ff9f43', amenity:'#ffda6b', elevator:'#ff8c00', escalator:'#ff8c00', exit:'#ff5252', checkpoint:'#ff3399' };
+function nc(t, zone) { return (zone === 'secure' ? TCOLORS_SECURE : TCOLORS)[t] || '#00d4ff'; }
+const GEO_COLORS = ['#ff3366','#33ff66','#3366ff'];
 
-function render(){
-  ctx.clearRect(0,0,canvas.width,canvas.height);
+function render() {
+  const cw = canvas.width, ch = canvas.height;
+  ctx.clearRect(0, 0, cw, ch);
   ctx.save();
-  ctx.translate(S.panOffset.x,S.panOffset.y);
-  ctx.scale(S.zoom,S.zoom);
+  ctx.translate(S.panOffset.x, S.panOffset.y);
+  ctx.scale(S.zoom, S.zoom);
 
-  if(S.mapImage){ctx.globalAlpha=0.85;ctx.drawImage(S.mapImage,0,0);ctx.globalAlpha=1;}
+  // Viewport in world coords
+  const vx0 = -S.panOffset.x / S.zoom;
+  const vy0 = -S.panOffset.y / S.zoom;
+  const vx1 = (cw - S.panOffset.x) / S.zoom;
+  const vy1 = (ch - S.panOffset.y) / S.zoom;
+  const pad = 20 / S.zoom; // padding so nodes at edge aren't clipped
 
-  if(S.showEdges){
-    ctx.lineWidth=1.5/S.zoom;
-    for(const e of S.edges){
-      const a=S.nodes.find(n=>n.id===e.from),b=S.nodes.find(n=>n.id===e.to);
-      if(!a||!b) continue;
-      ctx.strokeStyle=(S.selectedIds.has(a.id)||S.selectedIds.has(b.id))?'rgba(255,107,53,0.65)':'rgba(0,212,255,0.28)';
-      ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+  if (S.mapImage) {
+    ctx.globalAlpha = 0.85;
+    const ms = S.mapScale / 100;
+    ctx.drawImage(S.mapImage, S.mapOffsetX, S.mapOffsetY, S.mapImage.width * ms, S.mapImage.height * ms);
+    ctx.globalAlpha = 1;
+  }
+
+  // Draw edges (only if both endpoints are roughly in view)
+  if (S.showEdges) {
+    ctx.lineWidth = 1.5 / S.zoom;
+    for (const e of S.edges) {
+      const a = nodeMap[e.from], b = nodeMap[e.to];
+      if (!a || !b) continue;
+      // Rough edge culling: skip if both endpoints are off the same side
+      if ((a.x < vx0 - pad && b.x < vx0 - pad) || (a.x > vx1 + pad && b.x > vx1 + pad) ||
+          (a.y < vy0 - pad && b.y < vy0 - pad) || (a.y > vy1 + pad && b.y > vy1 + pad)) continue;
+      const isSel = S.selectedIds.has(a.id) || S.selectedIds.has(b.id);
+      const bothSecure = a.zone === 'secure' && b.zone === 'secure';
+      const crossZone = (a.zone || 'public') !== (b.zone || 'public');
+      ctx.strokeStyle = isSel ? 'rgba(255,107,53,0.65)' : crossZone ? 'rgba(255,51,153,0.45)' : bothSecure ? 'rgba(255,200,0,0.28)' : 'rgba(0,212,255,0.28)';
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
   }
 
-  const r=5/S.zoom;
-  for(const n of S.nodes){
-    const sel=S.selectedIds.has(n.id),col=sel?'#ff6b35':nc(n.type);
-    ctx.shadowColor=col;ctx.shadowBlur=(sel?10:5)/S.zoom;
-    ctx.beginPath();ctx.arc(n.x,n.y,r,0,Math.PI*2);
-    ctx.fillStyle=col;ctx.fill();ctx.shadowBlur=0;
-    ctx.beginPath();ctx.arc(n.x,n.y,r+2/S.zoom,0,Math.PI*2);
-    ctx.strokeStyle=sel?'rgba(255,107,53,0.5)':'rgba(255,255,255,0.12)';
-    ctx.lineWidth=1/S.zoom;ctx.stroke();
-    if(S.showLabels&&n.label){
-      ctx.font=`${10/S.zoom}px JetBrains Mono,monospace`;
-      ctx.fillStyle='rgba(232,234,240,0.9)';
-      ctx.shadowColor='rgba(0,0,0,0.9)';ctx.shadowBlur=3/S.zoom;
-      ctx.fillText(n.label,n.x+r+3/S.zoom,n.y+4/S.zoom);ctx.shadowBlur=0;
+  // Draw nodes (only visible ones)
+  const r = 5 / S.zoom;
+  for (const n of S.nodes) {
+    if (n.x < vx0 - pad || n.x > vx1 + pad || n.y < vy0 - pad || n.y > vy1 + pad) continue;
+    const sel = S.selectedIds.has(n.id), col = sel ? '#ff6b35' : nc(n.type, n.zone);
+    ctx.shadowColor = col; ctx.shadowBlur = (sel ? 10 : 5) / S.zoom;
+    ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = col; ctx.fill(); ctx.shadowBlur = 0;
+    ctx.beginPath(); ctx.arc(n.x, n.y, r + 2 / S.zoom, 0, Math.PI * 2);
+    ctx.strokeStyle = sel ? 'rgba(255,107,53,0.5)' : (n.zone === 'secure' ? 'rgba(255,200,0,0.35)' : 'rgba(255,255,255,0.12)');
+    ctx.lineWidth = 1 / S.zoom; ctx.stroke();
+    if (S.showLabels && n.label) {
+      ctx.font = `${10 / S.zoom}px JetBrains Mono,monospace`;
+      ctx.fillStyle = 'rgba(232,234,240,0.9)';
+      ctx.shadowColor = 'rgba(0,0,0,0.9)'; ctx.shadowBlur = 3 / S.zoom;
+      ctx.fillText(n.label, n.x + r + 3 / S.zoom, n.y + 4 / S.zoom); ctx.shadowBlur = 0;
     }
   }
+
+  // Draw geo-anchor markers (standalone points, not tied to nodes)
+  for (let gi = 0; gi < 3; gi++) {
+    const anchor = S.geoAnchors[gi];
+    if (!anchor || anchor.x == null) continue;
+    const ax = anchor.x, ay = anchor.y;
+    const gr = 12 / S.zoom;
+    // Crosshair
+    ctx.strokeStyle = GEO_COLORS[gi]; ctx.lineWidth = 2 / S.zoom;
+    ctx.beginPath(); ctx.moveTo(ax - gr, ay); ctx.lineTo(ax + gr, ay); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ax, ay - gr); ctx.lineTo(ax, ay + gr); ctx.stroke();
+    // Circle
+    ctx.beginPath(); ctx.arc(ax, ay, gr, 0, Math.PI * 2);
+    ctx.lineWidth = 2.5 / S.zoom;
+    ctx.setLineDash([4 / S.zoom, 3 / S.zoom]); ctx.stroke(); ctx.setLineDash([]);
+    // Label
+    ctx.font = `bold ${11 / S.zoom}px JetBrains Mono,monospace`;
+    ctx.fillStyle = GEO_COLORS[gi];
+    ctx.shadowColor = 'rgba(0,0,0,0.9)'; ctx.shadowBlur = 3 / S.zoom;
+    ctx.fillText('A' + (gi + 1), ax + gr + 2 / S.zoom, ay - gr / 2); ctx.shadowBlur = 0;
+  }
+
   ctx.restore();
 }
 
-function updStats(){
-  document.querySelector('#stat-nodes span').textContent=S.nodes.length;
-  document.querySelector('#stat-edges span').textContent=S.edges.length;
-  document.getElementById('zoom-display').textContent=Math.round(S.zoom*100);
-  document.getElementById('zoom-val').textContent=Math.round(S.zoom*100);
+function updStats() {
+  document.querySelector('#stat-nodes span').textContent = S.nodes.length;
+  document.querySelector('#stat-edges span').textContent = S.edges.length;
+  document.getElementById('zoom-display').textContent = Math.round(S.zoom * 100);
+  document.getElementById('zoom-val').textContent = Math.round(S.zoom * 100);
 }
 
 // =========================================================
-// HIT TEST
+// HIT TEST (uses spatial index)
 // =========================================================
-function nodeAt(sx,sy){
-  const w=s2w(sx,sy),hr=10/S.zoom;
-  for(let i=S.nodes.length-1;i>=0;i--){
-    const n=S.nodes[i],dx=n.x-w.x,dy=n.y-w.y;
-    if(Math.sqrt(dx*dx+dy*dy)<hr) return n;
+function nodeAt(sx, sy) {
+  const w = s2w(sx, sy), hr = 10 / S.zoom;
+  const nearby = nodesNear(w.x, w.y, hr);
+  let best = null, bestD = Infinity;
+  for (const n of nearby) {
+    const dx = n.x - w.x, dy = n.y - w.y, d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; best = n; }
   }
-  return null;
+  return bestD <= hr * hr ? best : null;
 }
 
 // =========================================================
 // AUTO GRID
 // =========================================================
-function stampGrid(visibleOnly){
-  const spacing=parseInt(document.getElementById('grid-spacing').value)||40;
-  const offX=parseInt(document.getElementById('grid-offset-x').value)||0;
-  const offY=parseInt(document.getElementById('grid-offset-y').value)||0;
+function stampGrid(visibleOnly) {
+  pushUndo();
+  const spacing = parseInt(document.getElementById('grid-spacing').value) || 40;
+  const offX = parseInt(document.getElementById('grid-offset-x').value) || 0;
+  const offY = parseInt(document.getElementById('grid-offset-y').value) || 0;
 
-  let x0,y0,x1,y1;
-  if(visibleOnly||!S.mapImage){
-    const tl=s2w(0,0),br=s2w(canvas.width,canvas.height);
-    x0=tl.x;y0=tl.y;x1=br.x;y1=br.y;
+  let x0, y0, x1, y1;
+  if (visibleOnly || !S.mapImage) {
+    const tl = s2w(0, 0), br = s2w(canvas.width, canvas.height);
+    x0 = tl.x; y0 = tl.y; x1 = br.x; y1 = br.y;
   } else {
-    x0=0;y0=0;x1=S.mapImage.width;y1=S.mapImage.height;
+    x0 = 0; y0 = 0; x1 = S.mapImage.width; y1 = S.mapImage.height;
   }
 
-  const startX=Math.ceil((x0-offX)/spacing)*spacing+offX;
-  const startY=Math.ceil((y0-offY)/spacing)*spacing+offY;
-  let added=0;
+  const startX = Math.ceil((x0 - offX) / spacing) * spacing + offX;
+  const startY = Math.ceil((y0 - offY) / spacing) * spacing + offY;
+  let added = 0;
 
-  for(let gx=startX;gx<=x1;gx+=spacing){
-    for(let gy=startY;gy<=y1;gy+=spacing){
-      const rx=Math.round(gx),ry=Math.round(gy);
-      const tooClose=S.nodes.some(n=>{const dx=n.x-rx,dy=n.y-ry;return Math.sqrt(dx*dx+dy*dy)<spacing*0.55;});
-      if(!tooClose){S.nodes.push({id:S.nextId++,x:rx,y:ry,label:'',type:'waypoint'});added++;}
+  _batchingUndo = true;
+  for (let gx = startX; gx <= x1; gx += spacing) {
+    for (let gy = startY; gy <= y1; gy += spacing) {
+      const rx = Math.round(gx), ry = Math.round(gy);
+      const near = nodesNear(rx, ry, spacing * 0.55);
+      if (near.length === 0) {
+        const node = { id: S.nextId++, x: rx, y: ry, label: '', type: 'waypoint', zone: S.nodeZone };
+        S.nodes.push(node);
+        addToSpatial(node);
+        added++;
+      }
     }
   }
+  _batchingUndo = false;
 
-  const note=document.getElementById('grid-note');
-  note.innerHTML=`<span class="ok">+${added} nodes stamped.</span> Now use <span class="hi">Lasso Delete</span> (L) to box-select walls, or <span class="hi">Paint Erase</span> (E) to brush them away.`;
-  genEdges();render();
+  const note = document.getElementById('grid-note');
+  note.innerHTML = `<span class="ok">+${added} nodes stamped.</span> Now use <span class="hi">Lasso Delete</span> (L) to box-select walls, or <span class="hi">Paint Erase</span> (E) to brush them away.`;
+  genEdges(); scheduleRender();
 }
 
-document.getElementById('stamp-grid-btn').addEventListener('click',()=>stampGrid(false));
-document.getElementById('stamp-visible-btn').addEventListener('click',()=>stampGrid(true));
+document.getElementById('stamp-grid-btn').addEventListener('click', () => stampGrid(false));
+document.getElementById('stamp-visible-btn').addEventListener('click', () => stampGrid(true));
 
 // =========================================================
-// PAINT ERASE
+// PAINT ERASE (batched undo for drag)
 // =========================================================
-function eraseAt(sx,sy){
-  const w=s2w(sx,sy),r=S.eraseRadius/S.zoom;
-  const before=S.nodes.length;
-  S.nodes=S.nodes.filter(n=>{const dx=n.x-w.x,dy=n.y-w.y;return Math.sqrt(dx*dx+dy*dy)>r;});
-  if(S.nodes.length!==before){genEdges();render();}
+let eraseUndoPushed = false;
+
+function eraseAt(sx, sy) {
+  if (!eraseUndoPushed) { pushUndo(); eraseUndoPushed = true; }
+  const w = s2w(sx, sy), r = S.eraseRadius / S.zoom;
+  const hits = nodesNear(w.x, w.y, r);
+  if (hits.length === 0) return;
+  const removeIds = new Set(hits.map(n => n.id));
+  for (const n of hits) removeFromSpatial(n);
+  S.nodes = S.nodes.filter(n => !removeIds.has(n.id));
+  genEdges(); scheduleRender();
 }
-function updateBrush(sx,sy){
-  if(S.mode!=='erase'){brushEl.style.display='none';return;}
-  const sr=S.eraseRadius;
-  brushEl.style.display='block';
-  brushEl.style.left=sx+'px';brushEl.style.top=sy+'px';
-  brushEl.style.width=(sr*2)+'px';brushEl.style.height=(sr*2)+'px';
+
+function updateBrush(sx, sy) {
+  if (S.mode !== 'erase' && S.mode !== 'zone') { brushEl.style.display = 'none'; return; }
+  const sr = S.mode === 'zone' ? S.zoneRadius : S.eraseRadius;
+  brushEl.style.display = 'block';
+  brushEl.style.left = sx + 'px'; brushEl.style.top = sy + 'px';
+  brushEl.style.width = (sr * 2) + 'px'; brushEl.style.height = (sr * 2) + 'px';
+  if (S.mode === 'zone') {
+    brushEl.style.borderColor = S.zonePaintZone === 'secure' ? 'rgba(255,200,0,0.8)' : 'rgba(0,212,255,0.8)';
+    brushEl.style.background = S.zonePaintZone === 'secure' ? 'rgba(255,200,0,0.07)' : 'rgba(0,212,255,0.07)';
+  } else {
+    brushEl.style.borderColor = 'rgba(255,80,80,0.8)';
+    brushEl.style.background = 'rgba(255,60,60,0.07)';
+  }
+}
+
+// =========================================================
+// ZONE PAINT
+// =========================================================
+let zonePaintUndoPushed = false;
+
+function zonePaintAt(sx, sy) {
+  if (!zonePaintUndoPushed) { pushUndo(); zonePaintUndoPushed = true; }
+  const w = s2w(sx, sy), r = S.zoneRadius / S.zoom;
+  const hits = nodesNear(w.x, w.y, r);
+  if (hits.length === 0) return;
+  let changed = false;
+  for (const n of hits) {
+    if (n.zone !== S.zonePaintZone) { n.zone = S.zonePaintZone; changed = true; }
+  }
+  if (changed) scheduleRender();
 }
 
 // =========================================================
 // LASSO
 // =========================================================
-function updateLassoEl(){
-  const l=S.lasso;
-  if(!l||!l.active){lassoEl.style.display='none';return;}
-  const s1=w2s(l.x1,l.y1),s2=w2s(l.x2,l.y2);
-  const x=Math.min(s1.x,s2.x),y=Math.min(s1.y,s2.y);
-  lassoEl.style.display='block';
-  lassoEl.style.left=x+'px';lassoEl.style.top=y+'px';
-  lassoEl.style.width=Math.abs(s2.x-s1.x)+'px';lassoEl.style.height=Math.abs(s2.y-s1.y)+'px';
+function updateLassoEl() {
+  const l = S.lasso;
+  if (!l || !l.active) { lassoEl.style.display = 'none'; return; }
+  const s1 = w2s(l.x1, l.y1), s2 = w2s(l.x2, l.y2);
+  const x = Math.min(s1.x, s2.x), y = Math.min(s1.y, s2.y);
+  lassoEl.style.display = 'block';
+  lassoEl.style.left = x + 'px'; lassoEl.style.top = y + 'px';
+  lassoEl.style.width = Math.abs(s2.x - s1.x) + 'px'; lassoEl.style.height = Math.abs(s2.y - s1.y) + 'px';
 }
-function commitLasso(){
-  const l=S.lasso;if(!l)return;
-  const mnX=Math.min(l.x1,l.x2),mxX=Math.max(l.x1,l.x2);
-  const mnY=Math.min(l.y1,l.y2),mxY=Math.max(l.y1,l.y2);
-  const before=S.nodes.length;
-  S.nodes=S.nodes.filter(n=>n.x<mnX||n.x>mxX||n.y<mnY||n.y>mxY);
+
+function commitLasso() {
+  const l = S.lasso; if (!l) return;
+  pushUndo();
+  const mnX = Math.min(l.x1, l.x2), mxX = Math.max(l.x1, l.x2);
+  const mnY = Math.min(l.y1, l.y2), mxY = Math.max(l.y1, l.y2);
+  const before = S.nodes.length;
+  const removed = S.nodes.filter(n => n.x >= mnX && n.x <= mxX && n.y >= mnY && n.y <= mxY);
+  for (const n of removed) removeFromSpatial(n);
+  S.nodes = S.nodes.filter(n => n.x < mnX || n.x > mxX || n.y < mnY || n.y > mxY);
   S.selectedIds.clear();
-  if(S.nodes.length!==before){genEdges();render();}
-  S.lasso=null;lassoEl.style.display='none';
+  if (S.nodes.length !== before) { genEdges(); scheduleRender(); }
+  S.lasso = null; lassoEl.style.display = 'none';
 }
 
 // =========================================================
 // PAN
 // =========================================================
-let isPan=false,panA={};
+let isPan = false, panA = {};
 
 // =========================================================
 // MOUSE
 // =========================================================
-canvas.addEventListener('mousemove',e=>{
-  const r=canvas.getBoundingClientRect(),sx=e.clientX-r.left,sy=e.clientY-r.top;
-  S.msx=sx;S.msy=sy;
-  const w=s2w(sx,sy);
-  document.getElementById('coord-x').textContent=Math.round(w.x);
-  document.getElementById('coord-y').textContent=Math.round(w.y);
-  updateBrush(sx,sy);
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+  S.msx = sx; S.msy = sy;
+  const w = s2w(sx, sy);
+  document.getElementById('coord-x').textContent = Math.round(w.x);
+  document.getElementById('coord-y').textContent = Math.round(w.y);
+  updateBrush(sx, sy);
 
-  if(isPan){
-    S.panOffset.x=panA.ox+(e.clientX-panA.sx);
-    S.panOffset.y=panA.oy+(e.clientY-panA.sy);
-    render();return;
+  if (isPan) {
+    S.panOffset.x = panA.ox + (e.clientX - panA.sx);
+    S.panOffset.y = panA.oy + (e.clientY - panA.sy);
+    scheduleRender(); return;
   }
-  if(S.mode==='erase'&&S.erasing){eraseAt(sx,sy);return;}
-  if(S.mode==='lasso'&&S.lasso&&S.lasso.active){
-    const ww=s2w(sx,sy);S.lasso.x2=ww.x;S.lasso.y2=ww.y;updateLassoEl();return;
+  if (S.mode === 'erase' && S.erasing) { eraseAt(sx, sy); return; }
+  if (S.mode === 'zone' && S.zonePainting) { zonePaintAt(sx, sy); return; }
+  if (S.mode === 'lasso' && S.lasso && S.lasso.active) {
+    const ww = s2w(sx, sy); S.lasso.x2 = ww.x; S.lasso.y2 = ww.y; updateLassoEl(); return;
   }
-  if(S.dragging){
-    const ww=s2w(sx,sy);S.dragging.node.x=ww.x+S.dragging.ox;S.dragging.node.y=ww.y+S.dragging.oy;
-    genEdges();render();
-  }
-});
-
-canvas.addEventListener('mousedown',e=>{
-  const r=canvas.getBoundingClientRect(),sx=e.clientX-r.left,sy=e.clientY-r.top;
-  if(e.button===1||(e.button===0&&S.mode==='pan')||(e.button===0&&e.altKey)){
-    isPan=true;panA={ox:S.panOffset.x,oy:S.panOffset.y,sx:e.clientX,sy:e.clientY};
-    canvas.classList.add('dragging');return;
-  }
-  if(e.button!==0) return;
-  const ww=s2w(sx,sy);
-
-  if(S.mode==='erase'){S.erasing=true;eraseAt(sx,sy);return;}
-  if(S.mode==='lasso'){S.lasso={x1:ww.x,y1:ww.y,x2:ww.x,y2:ww.y,active:true};updateLassoEl();return;}
-
-  const hit=nodeAt(sx,sy);
-  if(S.mode==='place'){
-    if(hit) return;
-    const node={id:S.nextId++,x:Math.round(ww.x),y:Math.round(ww.y),label:'',type:S.nodeType};
-    S.nodes.push(node);S.selectedIds.clear();S.selectedIds.add(node.id);
-    genEdges();render();showDetail(node);
-  } else if(S.mode==='select'){
-    if(hit){
-      if(e.shiftKey){if(S.selectedIds.has(hit.id))S.selectedIds.delete(hit.id);else S.selectedIds.add(hit.id);}
-      else{S.selectedIds.clear();S.selectedIds.add(hit.id);S.dragging={node:hit,ox:hit.x-ww.x,oy:hit.y-ww.y};}
-      showDetail(S.selectedIds.size===1?hit:null);render();
-    } else {S.selectedIds.clear();hideDetail();render();}
-  } else if(S.mode==='delete'){
-    if(hit){S.nodes=S.nodes.filter(n=>n.id!==hit.id);S.selectedIds.delete(hit.id);genEdges();hideDetail();render();}
+  if (S.dragging) {
+    const ww = s2w(sx, sy);
+    removeFromSpatial(S.dragging.node);
+    S.dragging.node.x = ww.x + S.dragging.ox;
+    S.dragging.node.y = ww.y + S.dragging.oy;
+    addToSpatial(S.dragging.node);
+    genEdges(); scheduleRender();
   }
 });
 
-canvas.addEventListener('mouseup',()=>{
-  if(isPan){isPan=false;canvas.classList.remove('dragging');}
-  if(S.erasing) S.erasing=false;
-  if(S.mode==='lasso'&&S.lasso&&S.lasso.active){S.lasso.active=false;commitLasso();}
-  if(S.dragging){S.dragging=null;genEdges();render();}
+canvas.addEventListener('mousedown', e => {
+  const r = canvas.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+  if (e.button === 1 || (e.button === 0 && S.mode === 'pan') || (e.button === 0 && e.altKey)) {
+    isPan = true; panA = { ox: S.panOffset.x, oy: S.panOffset.y, sx: e.clientX, sy: e.clientY };
+    canvas.classList.add('dragging'); return;
+  }
+  if (e.button !== 0) return;
+  const ww = s2w(sx, sy);
+
+  if (S.mode === 'erase') { S.erasing = true; eraseUndoPushed = false; eraseAt(sx, sy); return; }
+  if (S.mode === 'zone') { S.zonePainting = true; zonePaintUndoPushed = false; zonePaintAt(sx, sy); return; }
+  if (S.mode === 'lasso') { S.lasso = { x1: ww.x, y1: ww.y, x2: ww.x, y2: ww.y, active: true }; updateLassoEl(); return; }
+
+  const hit = nodeAt(sx, sy);
+
+  // Geo-anchor picking intercept - clicks anywhere on canvas, no node needed
+  if (S.geoMode != null) {
+    const idx = S.geoMode;
+    S.geoAnchors[idx] = { x: Math.round(ww.x), y: Math.round(ww.y), lat: S.geoAnchors[idx]?.lat || null, lng: S.geoAnchors[idx]?.lng || null };
+    S.geoMode = null;
+    S.affineMatrix = null;
+    updateGeoUI();
+    document.getElementById('mode-hint').textContent = HINTS[S.mode] || '';
+    scheduleRender();
+    return;
+  }
+
+  if (S.mode === 'place') {
+    if (hit) return;
+    pushUndo();
+    const node = { id: S.nextId++, x: Math.round(ww.x), y: Math.round(ww.y), label: '', type: S.nodeType, zone: S.nodeZone };
+    S.nodes.push(node);
+    addToSpatial(node);
+    S.selectedIds.clear(); S.selectedIds.add(node.id);
+    genEdges(); scheduleRender(); showDetail(node);
+  } else if (S.mode === 'select') {
+    if (hit) {
+      if (e.shiftKey) { if (S.selectedIds.has(hit.id)) S.selectedIds.delete(hit.id); else S.selectedIds.add(hit.id); }
+      else {
+        S.selectedIds.clear(); S.selectedIds.add(hit.id);
+        pushUndo(); // snapshot before drag
+        S.dragging = { node: hit, ox: hit.x - ww.x, oy: hit.y - ww.y };
+      }
+      showDetail(S.selectedIds.size === 1 ? hit : null); scheduleRender();
+    } else { S.selectedIds.clear(); hideDetail(); scheduleRender(); }
+  } else if (S.mode === 'delete') {
+    if (hit) {
+      pushUndo();
+      removeFromSpatial(hit);
+      S.nodes = S.nodes.filter(n => n.id !== hit.id);
+      S.selectedIds.delete(hit.id);
+      genEdges(); hideDetail(); scheduleRender();
+    }
+  }
 });
 
-canvas.addEventListener('mouseleave',()=>{
-  isPan=false;S.erasing=false;canvas.classList.remove('dragging');brushEl.style.display='none';
-  if(S.mode==='lasso'&&S.lasso&&S.lasso.active){S.lasso.active=false;commitLasso();}
+canvas.addEventListener('mouseup', () => {
+  if (isPan) { isPan = false; canvas.classList.remove('dragging'); }
+  if (S.erasing) { S.erasing = false; eraseUndoPushed = false; }
+  if (S.zonePainting) { S.zonePainting = false; zonePaintUndoPushed = false; }
+  if (S.mode === 'lasso' && S.lasso && S.lasso.active) { S.lasso.active = false; commitLasso(); }
+  if (S.dragging) { S.dragging = null; genEdges(); scheduleRender(); }
 });
 
-canvas.addEventListener('wheel',e=>{
+canvas.addEventListener('mouseleave', () => {
+  isPan = false; S.erasing = false; eraseUndoPushed = false; S.zonePainting = false; zonePaintUndoPushed = false; canvas.classList.remove('dragging'); brushEl.style.display = 'none';
+  if (S.mode === 'lasso' && S.lasso && S.lasso.active) { S.lasso.active = false; commitLasso(); }
+});
+
+canvas.addEventListener('wheel', e => {
   e.preventDefault();
-  const r=canvas.getBoundingClientRect(),sx=e.clientX-r.left,sy=e.clientY-r.top;
-  const f=e.deltaY<0?1.1:0.9,nz=Math.min(10,Math.max(0.05,S.zoom*f));
-  S.panOffset.x=sx-(sx-S.panOffset.x)*(nz/S.zoom);
-  S.panOffset.y=sy-(sy-S.panOffset.y)*(nz/S.zoom);
-  S.zoom=nz;updStats();render();updateBrush(S.msx,S.msy);
-},{passive:false});
+  const r = canvas.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+  const f = e.deltaY < 0 ? 1.1 : 0.9, nz = Math.min(10, Math.max(0.05, S.zoom * f));
+  S.panOffset.x = sx - (sx - S.panOffset.x) * (nz / S.zoom);
+  S.panOffset.y = sy - (sy - S.panOffset.y) * (nz / S.zoom);
+  S.zoom = nz; updStats(); scheduleRender(); updateBrush(S.msx, S.msy);
+}, { passive: false });
 
 // =========================================================
 // KEYBOARD
 // =========================================================
-const KMAP={p:'place',s:'select',v:'pan',d:'delete',e:'erase',l:'lasso'};
-document.addEventListener('keydown',e=>{
-  if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA') return;
-  const k=e.key.toLowerCase();
-  if(KMAP[k]){setMode(KMAP[k]);return;}
-  if(e.key==='Delete'||e.key==='Backspace'){
-    S.nodes=S.nodes.filter(n=>!S.selectedIds.has(n.id));
-    S.selectedIds.clear();genEdges();hideDetail();render();
+const KMAP = { p: 'place', s: 'select', v: 'pan', d: 'delete', e: 'erase', l: 'lasso', z: 'zone' };
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+  // Undo / Redo
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); redo(); return; }
+  // Ctrl+S to save
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); doSave(); return; }
+
+  const k = e.key.toLowerCase();
+  if (KMAP[k]) { setMode(KMAP[k]); return; }
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    pushUndo();
+    const toRemove = S.nodes.filter(n => S.selectedIds.has(n.id));
+    for (const n of toRemove) removeFromSpatial(n);
+    S.nodes = S.nodes.filter(n => !S.selectedIds.has(n.id));
+    S.selectedIds.clear(); genEdges(); hideDetail(); scheduleRender();
   }
-  if(e.key==='Escape'){S.selectedIds.clear();hideDetail();render();}
+  if (e.key === 'Escape') { S.selectedIds.clear(); hideDetail(); scheduleRender(); }
 });
 
 // =========================================================
 // MODE
 // =========================================================
-const HINTS={
-  place:'Click to place node',
-  select:'Click to select & drag | Shift+click multi-select | Del to delete',
-  lasso:'Drag a rectangle — all nodes inside are deleted on mouse release',
-  erase:'Hold and drag to brush-erase nodes under the circle',
-  pan:'Drag to pan | also: Alt+drag or middle-click from any mode',
-  delete:'Click a node to delete it',
+const HINTS = {
+  place: 'Click to place node',
+  select: 'Click to select & drag | Shift+click multi-select | Del to delete',
+  lasso: 'Drag a rectangle - all nodes inside are deleted on mouse release',
+  erase: 'Hold and drag to brush-erase nodes under the circle',
+  pan: 'Drag to pan | also: Alt+drag or middle-click from any mode',
+  delete: 'Click a node to delete it',
+  zone: 'Hold and drag to paint zone onto nodes under the brush',
 };
-function setMode(m){
-  S.mode=m;
-  document.querySelectorAll('.mode-btn').forEach(b=>b.classList.toggle('active',b.dataset.mode===m));
-  const cmap={pan:'mode-pan',select:'mode-select',delete:'mode-delete',erase:'mode-erase',lasso:'mode-lasso'};
-  canvas.className=cmap[m]||'';
-  document.getElementById('erase-settings').style.display=m==='erase'?'block':'none';
-  document.getElementById('mode-hint').textContent=HINTS[m]||'';
-  if(m!=='erase') brushEl.style.display='none';
+function setMode(m) {
+  S.mode = m;
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
+  const cmap = { pan: 'mode-pan', select: 'mode-select', delete: 'mode-delete', erase: 'mode-erase', lasso: 'mode-lasso', zone: 'mode-erase' };
+  canvas.className = cmap[m] || '';
+  document.getElementById('erase-settings').style.display = m === 'erase' ? 'block' : 'none';
+  document.getElementById('zone-settings').style.display = m === 'zone' ? 'block' : 'none';
+  document.getElementById('mode-hint').textContent = HINTS[m] || '';
+  if (m !== 'erase' && m !== 'zone') brushEl.style.display = 'none';
 }
-document.querySelectorAll('.mode-btn').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
+document.querySelectorAll('.mode-btn').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
 
 // =========================================================
 // NODE TYPE
 // =========================================================
-document.querySelectorAll('#global-type-grid .type-btn').forEach(b=>{
-  b.addEventListener('click',()=>{
-    document.querySelectorAll('#global-type-grid .type-btn').forEach(x=>x.classList.remove('active'));
-    b.classList.add('active');S.nodeType=b.dataset.type;
+document.querySelectorAll('#global-type-grid .type-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#global-type-grid .type-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active'); S.nodeType = b.dataset.type;
   });
 });
 
 // =========================================================
 // DETAIL PANEL
 // =========================================================
-function showDetail(node){
-  const p=document.getElementById('node-detail');
-  if(!node){hideDetail();return;}
+function showDetail(node) {
+  const p = document.getElementById('node-detail');
+  if (!node) { hideDetail(); return; }
   p.classList.add('visible');
-  document.getElementById('node-meta').innerHTML=`id: <span>${node.id}</span><br>x: <span>${Math.round(node.x)}</span>, y: <span>${Math.round(node.y)}</span><br>type: <span>${node.type}</span>`;
-  document.getElementById('node-label-input').value=node.label||'';
-  document.querySelectorAll('#node-type-select .type-btn').forEach(b=>b.classList.toggle('active',b.dataset.type===node.type));
+  document.getElementById('node-meta').innerHTML = `id: <span>${node.id}</span><br>x: <span>${Math.round(node.x)}</span>, y: <span>${Math.round(node.y)}</span><br>type: <span>${node.type}</span><br>zone: <span style="color:${node.zone === 'secure' ? '#ffc800' : 'var(--accent)'}">${node.zone || 'public'}</span>`;
+  const geoEl = document.getElementById('node-geo');
+  if (node.lat != null && node.lng != null) {
+    geoEl.style.display = 'block';
+    geoEl.innerHTML = `lat: <span style="color:var(--accent3)">${node.lat}</span>, lng: <span style="color:var(--accent3)">${node.lng}</span>`;
+  } else { geoEl.style.display = 'none'; }
+  document.getElementById('node-label-input').value = node.label || '';
+  document.querySelectorAll('#node-type-select .type-btn').forEach(b => b.classList.toggle('active', b.dataset.type === node.type));
+  document.querySelectorAll('.node-zone-btn').forEach(b => b.classList.toggle('active', b.dataset.zone === (node.zone || 'public')));
 }
-function hideDetail(){document.getElementById('node-detail').classList.remove('visible');}
+function hideDetail() { document.getElementById('node-detail').classList.remove('visible'); }
 
-document.getElementById('node-label-input').addEventListener('input',e=>{
-  if(S.selectedIds.size!==1) return;
-  const node=S.nodes.find(n=>n.id===[...S.selectedIds][0]);
-  if(node){node.label=e.target.value;render();}
+document.getElementById('node-label-input').addEventListener('input', e => {
+  if (S.selectedIds.size !== 1) return;
+  const node = nodeMap[[...S.selectedIds][0]];
+  if (node) { node.label = e.target.value; scheduleRender(); scheduleSave(); }
 });
-document.querySelectorAll('#node-type-select .type-btn').forEach(b=>{
-  b.addEventListener('click',()=>{
-    if(S.selectedIds.size!==1) return;
-    const node=S.nodes.find(n=>n.id===[...S.selectedIds][0]);
-    if(!node) return;
-    node.type=b.dataset.type;
-    document.querySelectorAll('#node-type-select .type-btn').forEach(x=>x.classList.remove('active'));
-    b.classList.add('active');showDetail(node);render();
+document.querySelectorAll('#node-type-select .type-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    if (S.selectedIds.size !== 1) return;
+    const node = nodeMap[[...S.selectedIds][0]];
+    if (!node) return;
+    pushUndo();
+    node.type = b.dataset.type;
+    document.querySelectorAll('#node-type-select .type-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active'); showDetail(node); scheduleRender();
   });
 });
-document.getElementById('delete-selected-btn').addEventListener('click',()=>{
-  S.nodes=S.nodes.filter(n=>!S.selectedIds.has(n.id));
-  S.selectedIds.clear();genEdges();hideDetail();render();
+document.getElementById('delete-selected-btn').addEventListener('click', () => {
+  pushUndo();
+  const toRemove = S.nodes.filter(n => S.selectedIds.has(n.id));
+  for (const n of toRemove) removeFromSpatial(n);
+  S.nodes = S.nodes.filter(n => !S.selectedIds.has(n.id));
+  S.selectedIds.clear(); genEdges(); hideDetail(); scheduleRender();
 });
+
+// Node detail zone buttons
+document.querySelectorAll('.node-zone-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    if (S.selectedIds.size !== 1) return;
+    const node = nodeMap[[...S.selectedIds][0]];
+    if (!node) return;
+    pushUndo();
+    node.zone = b.dataset.zone;
+    document.querySelectorAll('.node-zone-btn').forEach(x => x.classList.toggle('active', x === b));
+    showDetail(node); scheduleRender();
+  });
+});
+
+// Zone placement default buttons
+document.querySelectorAll('[data-zone-default]').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('[data-zone-default]').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    S.nodeZone = b.dataset.zoneDefault;
+  });
+});
+
+// Zone paint brush buttons
+document.querySelectorAll('.zone-paint-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.zone-paint-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    S.zonePaintZone = b.dataset.zone;
+  });
+});
+
+// Zone paint brush radius
+document.getElementById('zone-radius').addEventListener('input', e => { S.zoneRadius = parseInt(e.target.value) || 40; });
 
 // =========================================================
 // SETTINGS
 // =========================================================
-document.getElementById('edge-radius').addEventListener('input',e=>{S.edgeRadius=parseInt(e.target.value)||60;genEdges();render();});
-document.getElementById('snap-8dir').addEventListener('change',e=>{S.snap8dir=e.target.checked;genEdges();render();});
-document.getElementById('show-edges').addEventListener('change',e=>{S.showEdges=e.target.checked;render();});
-document.getElementById('show-labels').addEventListener('change',e=>{S.showLabels=e.target.checked;render();});
-document.getElementById('erase-radius').addEventListener('input',e=>{S.eraseRadius=parseInt(e.target.value)||30;});
-document.getElementById('regen-edges-btn').addEventListener('click',()=>{genEdges();render();});
-document.getElementById('clear-all-btn').addEventListener('click',()=>{
-  if(!confirm('Clear all nodes and edges?')) return;
-  S.nodes=[];S.edges=[];S.selectedIds.clear();S.nextId=1;hideDetail();updStats();render();
+document.getElementById('edge-radius').addEventListener('input', e => { S.edgeRadius = parseInt(e.target.value) || 60; genEdges(); scheduleRender(); });
+document.getElementById('snap-8dir').addEventListener('change', e => { S.snap8dir = e.target.checked; genEdges(); scheduleRender(); });
+document.getElementById('show-edges').addEventListener('change', e => { S.showEdges = e.target.checked; scheduleRender(); });
+document.getElementById('show-labels').addEventListener('change', e => { S.showLabels = e.target.checked; scheduleRender(); });
+document.getElementById('erase-radius').addEventListener('input', e => { S.eraseRadius = parseInt(e.target.value) || 30; });
+document.getElementById('regen-edges-btn').addEventListener('click', () => { genEdges(); scheduleRender(); });
+document.getElementById('clear-all-btn').addEventListener('click', () => {
+  if (!confirm('Clear all nodes and edges?')) return;
+  pushUndo();
+  S.nodes = []; S.edges = []; S.selectedIds.clear(); S.nextId = 1;
+  spatialGrid = {}; nodeMap = {};
+  hideDetail(); updStats(); scheduleRender();
 });
 
 // =========================================================
 // MAP
 // =========================================================
-document.getElementById('map-upload').addEventListener('change',e=>{
-  const f=e.target.files[0];if(!f) return;
-  const img=new Image();
-  img.onload=()=>{
-    S.mapImage=img;
-    const sx=canvas.width/img.width,sy=canvas.height/img.height;
-    S.zoom=Math.min(sx,sy)*0.95;
-    S.panOffset.x=(canvas.width-img.width*S.zoom)/2;
-    S.panOffset.y=(canvas.height-img.height*S.zoom)/2;
-    updStats();render();
-    document.getElementById('clear-map-btn').style.display='block';
+document.getElementById('map-upload').addEventListener('change', e => {
+  const f = e.target.files[0]; if (!f) return;
+  const img = new Image();
+  img.onload = () => {
+    S.mapImage = img;
+    const sx = canvas.width / img.width, sy = canvas.height / img.height;
+    S.zoom = Math.min(sx, sy) * 0.95;
+    S.panOffset.x = (canvas.width - img.width * S.zoom) / 2;
+    S.panOffset.y = (canvas.height - img.height * S.zoom) / 2;
+    updStats(); scheduleRender();
+    document.getElementById('clear-map-btn').style.display = 'block';
+    document.getElementById('map-offset-controls').style.display = 'block';
+    // Try to persist map as compressed JPEG data URL (max ~1.5MB)
+    try {
+      const c = document.createElement('canvas');
+      c.width = img.width; c.height = img.height;
+      c.getContext('2d').drawImage(img, 0, 0);
+      const dataUrl = c.toDataURL('image/jpeg', 0.5);
+      if (dataUrl.length < 2 * 1024 * 1024) {
+        S.mapImageDataUrl = dataUrl;
+      } else {
+        S.mapImageDataUrl = null;
+        console.log('Map image too large to persist, will need re-upload on reload');
+      }
+    } catch (err) {
+      S.mapImageDataUrl = null;
+    }
+    scheduleSave();
   };
-  img.src=URL.createObjectURL(f);
+  img.src = URL.createObjectURL(f);
 });
-document.getElementById('clear-map-btn').addEventListener('click',()=>{S.mapImage=null;document.getElementById('clear-map-btn').style.display='none';render();});
+document.getElementById('clear-map-btn').addEventListener('click', () => {
+  S.mapImage = null; S.mapImageDataUrl = null;
+  S.mapOffsetX = 0; S.mapOffsetY = 0; S.mapScale = 100;
+  document.getElementById('map-offset-x').value = 0;
+  document.getElementById('map-offset-y').value = 0;
+  document.getElementById('map-scale').value = 100;
+  document.getElementById('clear-map-btn').style.display = 'none';
+  document.getElementById('map-offset-controls').style.display = 'none';
+  scheduleRender(); scheduleSave();
+});
+
+// Map image offset/scale controls
+['map-offset-x', 'map-offset-y', 'map-scale'].forEach(id => {
+  document.getElementById(id).addEventListener('input', () => {
+    S.mapOffsetX = parseFloat(document.getElementById('map-offset-x').value) || 0;
+    S.mapOffsetY = parseFloat(document.getElementById('map-offset-y').value) || 0;
+    S.mapScale = parseFloat(document.getElementById('map-scale').value) || 100;
+    scheduleRender(); scheduleSave();
+  });
+});
+
+// Arrow key nudging for map offset (when an offset input is focused)
+document.addEventListener('keydown', (e) => {
+  if (!S.mapImage) return;
+  const active = document.activeElement;
+  const isOffsetInput = active && (active.id === 'map-offset-x' || active.id === 'map-offset-y');
+  // Also allow arrow keys when no input is focused and map exists
+  if (!isOffsetInput && active && active.tagName === 'INPUT') return;
+  const step = e.shiftKey ? 10 : 1;
+  let handled = false;
+  if (e.key === 'ArrowLeft' && e.ctrlKey) { S.mapOffsetX -= step; handled = true; }
+  else if (e.key === 'ArrowRight' && e.ctrlKey) { S.mapOffsetX += step; handled = true; }
+  else if (e.key === 'ArrowUp' && e.ctrlKey) { S.mapOffsetY -= step; handled = true; }
+  else if (e.key === 'ArrowDown' && e.ctrlKey) { S.mapOffsetY += step; handled = true; }
+  if (handled) {
+    e.preventDefault();
+    document.getElementById('map-offset-x').value = S.mapOffsetX;
+    document.getElementById('map-offset-y').value = S.mapOffsetY;
+    scheduleRender(); scheduleSave();
+  }
+});
 
 // =========================================================
 // EXPORT
 // =========================================================
-let curTab='sql-nodes',curContent='';
-function buildExports(){
-  const ns=S.nodes,es=S.edges;
-  const sqlN=`-- nav_nodes INSERT\n-- Prerequisite: CREATE TABLE nav_nodes (id SERIAL PRIMARY KEY, label TEXT, x FLOAT, y FLOAT, node_type TEXT);\n\nINSERT INTO nav_nodes (id, label, x, y, node_type) VALUES\n`
-    +ns.map(n=>`  (${n.id}, ${n.label?`'${n.label.replace(/'/g,"''")}'`:'NULL'}, ${Math.round(n.x)}, ${Math.round(n.y)}, '${n.type}')`).join(',\n')
-    +';\n\nSELECT setval(\'nav_nodes_id_seq\', (SELECT MAX(id) FROM nav_nodes));';
-  const sqlE=`-- nav_edges INSERT\n-- Prerequisite: CREATE TABLE nav_edges (id SERIAL PRIMARY KEY, from_node INT REFERENCES nav_nodes(id), to_node INT REFERENCES nav_nodes(id), distance FLOAT, direction TEXT);\n\nINSERT INTO nav_edges (from_node, to_node, distance, direction) VALUES\n`
-    +es.map(e=>`  (${e.from}, ${e.to}, ${e.distance}, '${e.direction}')`).join(',\n')+';';
-  const json=JSON.stringify({nodes:ns,edges:es},null,2);
-  const lastId=ns.length>1?ns[ns.length-1].id:'N';
-  const pgr=`-- pgRouting setup + example Dijkstra query\n-- Requires: CREATE EXTENSION pgrouting;\n\nCREATE OR REPLACE VIEW nav_edges_pgr AS\nSELECT\n  id,\n  from_node AS source,\n  to_node   AS target,\n  distance  AS cost,\n  distance  AS reverse_cost\nFROM nav_edges;\n\n-- Find shortest path from node 1 to node ${lastId}\nSELECT\n  r.seq,\n  r.node,\n  r.edge,\n  r.cost,\n  n.label,\n  n.x,\n  n.y,\n  n.node_type\nFROM pgr_dijkstra(\n  'SELECT id, source, target, cost, reverse_cost FROM nav_edges_pgr',\n  1, ${lastId},\n  directed => false\n) AS r\nJOIN nav_nodes n ON r.node = n.id\nORDER BY r.seq;`;
-  return {'sql-nodes':sqlN,'sql-edges':sqlE,'json':json,'pgrouting':pgr};
+let curTab = 'sql-nodes', curContent = '';
+function buildExports() {
+  const ns = S.nodes, es = S.edges;
+  const hasGeo = ns.some(n => n.lat != null && n.lng != null);
+  const sqlN = hasGeo
+    ? `-- nav_nodes INSERT (with lat/lng and zone)\n-- Prerequisite: CREATE TABLE nav_nodes (id SERIAL PRIMARY KEY, label TEXT, x FLOAT, y FLOAT, node_type TEXT, zone TEXT DEFAULT 'public', lat DOUBLE PRECISION, lng DOUBLE PRECISION);\n\nINSERT INTO nav_nodes (id, label, x, y, node_type, zone, lat, lng) VALUES\n`
+      + ns.map(n => `  (${n.id}, ${n.label ? `'${n.label.replace(/'/g, "''")}'` : 'NULL'}, ${Math.round(n.x)}, ${Math.round(n.y)}, '${n.type}', '${n.zone || 'public'}', ${n.lat != null ? n.lat : 'NULL'}, ${n.lng != null ? n.lng : 'NULL'})`).join(',\n')
+      + ';\n\nSELECT setval(\'nav_nodes_id_seq\', (SELECT MAX(id) FROM nav_nodes));'
+    : `-- nav_nodes INSERT\n-- Prerequisite: CREATE TABLE nav_nodes (id SERIAL PRIMARY KEY, label TEXT, x FLOAT, y FLOAT, node_type TEXT, zone TEXT DEFAULT 'public');\n\nINSERT INTO nav_nodes (id, label, x, y, node_type, zone) VALUES\n`
+      + ns.map(n => `  (${n.id}, ${n.label ? `'${n.label.replace(/'/g, "''")}'` : 'NULL'}, ${Math.round(n.x)}, ${Math.round(n.y)}, '${n.type}', '${n.zone || 'public'}')`).join(',\n')
+      + ';\n\nSELECT setval(\'nav_nodes_id_seq\', (SELECT MAX(id) FROM nav_nodes));';
+  const sqlE = `-- nav_edges INSERT\n-- Prerequisite: CREATE TABLE nav_edges (id SERIAL PRIMARY KEY, from_node INT REFERENCES nav_nodes(id), to_node INT REFERENCES nav_nodes(id), distance FLOAT, direction TEXT);\n\nINSERT INTO nav_edges (from_node, to_node, distance, direction) VALUES\n`
+    + es.map(e => `  (${e.from}, ${e.to}, ${e.distance}, '${e.direction}')`).join(',\n') + ';';
+  const json = JSON.stringify({ nodes: ns, edges: es, geoAnchors: S.geoAnchors }, null, 2);
+  const lastId = ns.length > 1 ? ns[ns.length - 1].id : 'N';
+  const pgr = hasGeo
+    ? `-- pgRouting setup + example Dijkstra query (with PostGIS geometry)\n-- Requires: CREATE EXTENSION pgrouting; CREATE EXTENSION postgis;\n\nALTER TABLE nav_nodes ADD COLUMN IF NOT EXISTS geom geometry(Point, 4326);\nUPDATE nav_nodes SET geom = ST_SetSRID(ST_MakePoint(lng, lat), 4326) WHERE lat IS NOT NULL;\n\nCREATE OR REPLACE VIEW nav_edges_pgr AS\nSELECT\n  id,\n  from_node AS source,\n  to_node   AS target,\n  distance  AS cost,\n  distance  AS reverse_cost\nFROM nav_edges;\n\nSELECT\n  r.seq,\n  r.node,\n  r.edge,\n  r.cost,\n  n.label,\n  n.x,\n  n.y,\n  n.lat,\n  n.lng,\n  n.node_type,\n  n.zone\nFROM pgr_dijkstra(\n  'SELECT id, source, target, cost, reverse_cost FROM nav_edges_pgr',\n  1, ${lastId},\n  directed => false\n) AS r\nJOIN nav_nodes n ON r.node = n.id\nORDER BY r.seq;\n\n-- Find nearest amenity in the SAME zone as the user\n-- Replace :user_zone with 'public' or 'secure'\n-- SELECT * FROM nav_nodes\n-- WHERE node_type = 'amenity' AND zone = :user_zone\n-- ORDER BY geom <-> ST_SetSRID(ST_MakePoint(:user_lng, :user_lat), 4326)\n-- LIMIT 5;`
+    : `-- pgRouting setup + example Dijkstra query\n-- Requires: CREATE EXTENSION pgrouting;\n\nCREATE OR REPLACE VIEW nav_edges_pgr AS\nSELECT\n  id,\n  from_node AS source,\n  to_node   AS target,\n  distance  AS cost,\n  distance  AS reverse_cost\nFROM nav_edges;\n\nSELECT\n  r.seq,\n  r.node,\n  r.edge,\n  r.cost,\n  n.label,\n  n.x,\n  n.y,\n  n.node_type,\n  n.zone\nFROM pgr_dijkstra(\n  'SELECT id, source, target, cost, reverse_cost FROM nav_edges_pgr',\n  1, ${lastId},\n  directed => false\n) AS r\nJOIN nav_nodes n ON r.node = n.id\nORDER BY r.seq;`;
+  return { 'sql-nodes': sqlN, 'sql-edges': sqlE, 'json': json, 'pgrouting': pgr };
 }
 
-document.getElementById('export-btn').addEventListener('click',()=>{
-  curTab='sql-nodes';
-  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active',b.dataset.tab==='sql-nodes'));
-  curContent=buildExports()['sql-nodes'];
-  document.getElementById('export-content').textContent=curContent;
+document.getElementById('export-btn').addEventListener('click', () => {
+  curTab = 'sql-nodes';
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === 'sql-nodes'));
+  curContent = buildExports()['sql-nodes'];
+  document.getElementById('export-content').textContent = curContent;
   document.getElementById('export-modal').classList.add('open');
 });
-document.querySelectorAll('.tab-btn').forEach(b=>{
-  b.addEventListener('click',()=>{
-    curTab=b.dataset.tab;
-    document.querySelectorAll('.tab-btn').forEach(x=>x.classList.toggle('active',x===b));
-    curContent=buildExports()[curTab];
-    document.getElementById('export-content').textContent=curContent;
+document.querySelectorAll('.tab-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    curTab = b.dataset.tab;
+    document.querySelectorAll('.tab-btn').forEach(x => x.classList.toggle('active', x === b));
+    curContent = buildExports()[curTab];
+    document.getElementById('export-content').textContent = curContent;
   });
 });
-document.getElementById('modal-close-btn').addEventListener('click',()=>document.getElementById('export-modal').classList.remove('open'));
-document.getElementById('copy-btn').addEventListener('click',()=>{
-  navigator.clipboard.writeText(curContent).then(()=>{
-    const b=document.getElementById('copy-btn');b.textContent='Copied!';
-    setTimeout(()=>b.textContent='Copy',1500);
+document.getElementById('modal-close-btn').addEventListener('click', () => document.getElementById('export-modal').classList.remove('open'));
+document.getElementById('copy-btn').addEventListener('click', () => {
+  navigator.clipboard.writeText(curContent).then(() => {
+    const b = document.getElementById('copy-btn'); b.textContent = 'Copied!';
+    setTimeout(() => b.textContent = 'Copy', 1500);
   });
 });
-document.getElementById('download-btn').addEventListener('click',()=>{
-  const ext=curTab==='json'?'json':'sql';
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(new Blob([curContent],{type:'text/plain'}));
-  a.download=`terminal_d_${curTab}.${ext}`;a.click();
+document.getElementById('download-btn').addEventListener('click', () => {
+  const ext = curTab === 'json' ? 'json' : 'sql';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([curContent], { type: 'text/plain' }));
+  a.download = `terminal_d_${curTab}.${ext}`; a.click();
 });
 
 // =========================================================
 // IMPORT
 // =========================================================
-document.getElementById('import-btn').addEventListener('click',()=>document.getElementById('import-modal').classList.add('open'));
-document.getElementById('import-close-btn').addEventListener('click',()=>document.getElementById('import-modal').classList.remove('open'));
-document.getElementById('import-confirm-btn').addEventListener('click',()=>{
-  try{
-    const d=JSON.parse(document.getElementById('import-textarea').value);
-    if(d.nodes){S.nodes=d.nodes;S.nextId=Math.max(...S.nodes.map(n=>n.id),0)+1;}
-    if(d.edges) S.edges=d.edges; else genEdges();
-    S.selectedIds.clear();hideDetail();updStats();render();
+document.getElementById('import-btn').addEventListener('click', () => document.getElementById('import-modal').classList.add('open'));
+document.getElementById('import-close-btn').addEventListener('click', () => document.getElementById('import-modal').classList.remove('open'));
+document.getElementById('import-confirm-btn').addEventListener('click', () => {
+  try {
+    pushUndo();
+    const d = JSON.parse(document.getElementById('import-textarea').value);
+    if (d.nodes) { S.nodes = d.nodes; S.nextId = Math.max(...S.nodes.map(n => n.id), 0) + 1; }
+    if (d.edges) S.edges = d.edges; else genEdges();
+    if (d.geoAnchors) { S.geoAnchors = d.geoAnchors; updateGeoUI(); }
+    S.selectedIds.clear();
+    rebuildSpatialIndex(); rebuildNodeMap();
+    hideDetail(); updStats(); scheduleRender();
     document.getElementById('import-modal').classList.remove('open');
-  }catch(err){alert('Invalid JSON: '+err.message);}
+  } catch (err) { alert('Invalid JSON: ' + err.message); }
+});
+
+// =========================================================
+// GEOREFERENCING
+// =========================================================
+function updateGeoUI() {
+  S.geoAnchors.forEach((a, i) => {
+    const row = document.querySelectorAll('.geo-anchor-row')[i];
+    const label = row.querySelector('.geo-node-label');
+    const latIn = row.querySelector('.geo-lat');
+    const lngIn = row.querySelector('.geo-lng');
+    const btn = row.querySelector('.geo-pick-btn');
+    if (a && a.x != null) {
+      label.textContent = `(${a.x}, ${a.y})`;
+      latIn.value = a.lat != null ? a.lat : '';
+      lngIn.value = a.lng != null ? a.lng : '';
+      btn.textContent = 'Change';
+    } else {
+      label.textContent = 'none';
+      btn.textContent = 'Pick';
+    }
+    btn.style.background = S.geoMode === i ? 'rgba(255,51,102,0.3)' : '';
+    btn.style.borderColor = S.geoMode === i ? '#ff3366' : '';
+  });
+}
+
+document.querySelectorAll('.geo-pick-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const idx = parseInt(btn.dataset.idx);
+    if (S.geoMode === idx) { S.geoMode = null; } else { S.geoMode = idx; }
+    updateGeoUI();
+    if (S.geoMode != null) {
+      document.getElementById('mode-hint').textContent = 'Click anywhere on canvas to set geo-anchor #' + (idx + 1);
+    }
+  });
+});
+
+document.querySelectorAll('.geo-lat, .geo-lng').forEach(inp => {
+  inp.addEventListener('input', () => {
+    const idx = parseInt(inp.dataset.idx);
+    if (!S.geoAnchors[idx]) return;
+    if (inp.classList.contains('geo-lat')) S.geoAnchors[idx].lat = parseFloat(inp.value) || null;
+    else S.geoAnchors[idx].lng = parseFloat(inp.value) || null;
+    S.affineMatrix = null;
+  });
+});
+
+function solveAffine(pts) {
+  const [p0, p1, p2] = pts;
+  const det = p0.x * (p1.y - p2.y) - p0.y * (p1.x - p2.x) + (p1.x * p2.y - p2.x * p1.y);
+  if (Math.abs(det) < 1e-10) return null;
+  const invDet = 1 / det;
+  const inv = [
+    [(p1.y - p2.y) * invDet, (p2.y - p0.y) * invDet, (p0.y - p1.y) * invDet],
+    [(p2.x - p1.x) * invDet, (p0.x - p2.x) * invDet, (p1.x - p0.x) * invDet],
+    [(p1.x * p2.y - p2.x * p1.y) * invDet, (p2.x * p0.y - p0.x * p2.y) * invDet, (p0.x * p1.y - p1.x * p0.y) * invDet],
+  ];
+  const lats = [p0.lat, p1.lat, p2.lat];
+  const lngs = [p0.lng, p1.lng, p2.lng];
+  return {
+    a: inv[0][0] * lats[0] + inv[0][1] * lats[1] + inv[0][2] * lats[2],
+    b: inv[1][0] * lats[0] + inv[1][1] * lats[1] + inv[1][2] * lats[2],
+    c: inv[2][0] * lats[0] + inv[2][1] * lats[1] + inv[2][2] * lats[2],
+    d: inv[0][0] * lngs[0] + inv[0][1] * lngs[1] + inv[0][2] * lngs[2],
+    e: inv[1][0] * lngs[0] + inv[1][1] * lngs[1] + inv[1][2] * lngs[2],
+    f: inv[2][0] * lngs[0] + inv[2][1] * lngs[1] + inv[2][2] * lngs[2],
+  };
+}
+
+function pixelToGeo(x, y) {
+  if (!S.affineMatrix) return null;
+  const m = S.affineMatrix;
+  return { lat: m.a * x + m.b * y + m.c, lng: m.d * x + m.e * y + m.f };
+}
+
+document.getElementById('compute-geo-btn').addEventListener('click', () => {
+  const statusEl = document.getElementById('geo-status');
+  const pts = [];
+  for (let i = 0; i < 3; i++) {
+    const a = S.geoAnchors[i];
+    if (!a || a.x == null || a.lat == null || a.lng == null) {
+      statusEl.innerHTML = '<span style="color:#ff6060">Anchor ' + (i + 1) + ' is incomplete. Pick a point and enter lat/lng for all 3.</span>';
+      return;
+    }
+    pts.push({ x: a.x, y: a.y, lat: a.lat, lng: a.lng });
+  }
+  const matrix = solveAffine(pts);
+  if (!matrix) {
+    statusEl.innerHTML = '<span style="color:#ff6060">Points are collinear, cannot solve. Pick 3 non-collinear points.</span>';
+    return;
+  }
+  pushUndo();
+  S.affineMatrix = matrix;
+  let count = 0;
+  for (const n of S.nodes) {
+    const geo = pixelToGeo(n.x, n.y);
+    if (geo) { n.lat = Math.round(geo.lat * 1e7) / 1e7; n.lng = Math.round(geo.lng * 1e7) / 1e7; count++; }
+  }
+  statusEl.innerHTML = `<span class="ok">Done! ${count} nodes now have lat/lng.</span> Affine residuals OK.`;
+  scheduleRender();
+  if (S.selectedIds.size === 1) {
+    const node = nodeMap[[...S.selectedIds][0]];
+    if (node) showDetail(node);
+  }
+});
+
+document.getElementById('clear-geo-btn').addEventListener('click', () => {
+  pushUndo();
+  S.geoAnchors = [null, null, null];
+  S.geoMode = null;
+  S.affineMatrix = null;
+  for (const n of S.nodes) { delete n.lat; delete n.lng; }
+  updateGeoUI();
+  document.getElementById('geo-status').innerHTML = '';
+  scheduleRender();
 });
 
 // =========================================================
 // INIT
 // =========================================================
+const didRestore = loadSave();
+rebuildSpatialIndex();
+rebuildNodeMap();
 setMode('place');
+updateGeoUI();
 updStats();
-render();
+updUndoStats();
+scheduleRender();
+
+if (didRestore) {
+  console.log('Session restored from localStorage');
+}
 </script>
 </body>
 </html>
