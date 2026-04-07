@@ -12,7 +12,11 @@ import kotlinx.coroutines.launch
 // --- Tunable constants ---
 const val SIMULATION_STEP_INTERVAL_MS = 2000L
 const val OFF_PATH_THRESHOLD_METERS = 15.0
-const val OFF_PATH_TELEPORT_METERS = 25.0
+// Off-path nudge is small + random: a few meters, in any direction. Big
+// enough that the recalc snaps to a different nav node, small enough that
+// the user doesn't visibly teleport across the terminal.
+const val OFF_PATH_NUDGE_MIN_METERS = 5.0
+const val OFF_PATH_NUDGE_MAX_METERS = 10.0
 
 enum class RestroomGender { ANY, MALE, FEMALE }
 
@@ -58,6 +62,10 @@ fun filteredAmenities(state: NavigationState): List<Amenity> = state.amenities.f
     val accessOk = !state.accessibilityMode ||
         a.has_accessible_unit == true ||
         a.wheelchairaccessible.equals("yes", ignoreCase = true)
+    // Only show amenities that live in the same zone as the user's current
+    // starting point. Until the user picks a start location, currentZone is
+    // null and we don't filter by zone.
+    val zoneOk = state.currentZone == null || a.zone == state.currentZone
     val genderOk = if (state.dropdownTypeFilter == "restroom" &&
         state.restroomGenderFilter != RestroomGender.ANY
     ) {
@@ -70,7 +78,7 @@ fun filteredAmenities(state: NavigationState): List<Amenity> = state.amenities.f
             RestroomGender.ANY -> true
         }
     } else true
-    chipOk && dropdownOk && accessOk && genderOk
+    chipOk && dropdownOk && accessOk && zoneOk && genderOk
 }
 
 class NavigationViewModel : ViewModel() {
@@ -322,10 +330,17 @@ class NavigationViewModel : ViewModel() {
         // legally cross TSA to a public-side node and vice versa.
         val zone = _state.value.currentZone
 
-        // Teleport ~25 meters roughly north-east of current position
-        // 1 degree lat ≈ 111,000 m, so 25m ≈ 0.000225 degrees
-        val offsetLat = OFF_PATH_TELEPORT_METERS / 111000.0
-        val offsetLng = OFF_PATH_TELEPORT_METERS / (111000.0 * Math.cos(Math.toRadians(current.latitude)))
+        // Small nudge in a random direction. Previously this was a fixed
+        // 25m NE jump which was both too large and too predictable —
+        // pressing the button always sent the user the same way. Now each
+        // press picks a fresh bearing and a 5–10m distance, so the recalc
+        // is short and goes somewhere different every time.
+        val angle = Math.random() * 2 * Math.PI
+        val meters = OFF_PATH_NUDGE_MIN_METERS +
+            Math.random() * (OFF_PATH_NUDGE_MAX_METERS - OFF_PATH_NUDGE_MIN_METERS)
+        val offsetLat = (meters * Math.sin(angle)) / 111000.0
+        val offsetLng = (meters * Math.cos(angle)) /
+            (111000.0 * Math.cos(Math.toRadians(current.latitude)))
         val offPathLocation = LatLng(current.latitude + offsetLat, current.longitude + offsetLng)
 
         stopSimulation()
@@ -378,12 +393,19 @@ class NavigationViewModel : ViewModel() {
     // ── Location update (used by real GPS if ever connected) ───────
 
     fun updateUserLocation(location: LatLng) {
-        // Don't let real GPS overwrite the simulated position while a
-        // simulation is running — otherwise the camera jumps to the
-        // device's physical location every fix and snaps back on the
-        // next simulated step.
-        if (_state.value.isSimulating) return
-        _state.value = _state.value.copy(userLocation = location)
+        val s = _state.value
+        // Don't let real GPS overwrite the user position when we're in
+        // any kind of mock/test mode:
+        //   - isSimulating: a simulated walk is in progress; a real fix
+        //     would snap the camera away every second.
+        //   - currentZone != null: the user pressed "Start in Secure" or
+        //     "Start in Public", so we're running a spoofed-location test.
+        //     The FusedLocationProviderClient fires roughly every second,
+        //     so without this check the mock position lasts only until the
+        //     next GPS fix — which is why the blue dot "flashed" and then
+        //     every route started from the dev's real physical location.
+        if (s.isSimulating || s.currentZone != null) return
+        _state.value = s.copy(userLocation = location)
 
         if (_state.value.isNavigating && !_state.value.isSimulating && _state.value.waypoints.isNotEmpty()) {
             val currentIndex = _state.value.currentWaypointIndex
@@ -438,14 +460,50 @@ class NavigationViewModel : ViewModel() {
             amenities = prev.amenities,
             accessibilityMode = prev.accessibilityMode,
             activeTypeFilters = prev.activeTypeFilters,
-            userLocation = prev.userLocation
+            userLocation = prev.userLocation,
+            // Keep the test-start zone so the amenity filter doesn't reset
+            // to "show everything" the moment the user stops a route.
+            currentZone = prev.currentZone
         )
     }
 
-    fun setMockLocation() {
-        _state.value = _state.value.copy(
-            userLocation = LatLng(32.89768836069466, -97.04474161852207)
-        )
+    /**
+     * Drop the user at a random nav node in the requested zone
+     * (`"secure"` or `"public"`). Used by the on-screen test buttons so we
+     * can validate routing/filtering from either side of TSA without needing
+     * a real GPS fix.
+     *
+     * Also acts as a full reset: stops any active simulation, clears the
+     * route polyline, destination, and selection, then seeds `currentZone`
+     * so the amenity list filters correctly from the moment the user is
+     * placed. This is what lets the user finish one route and start a new
+     * test without restarting the app — just press the button again.
+     */
+    fun setMockStart(zone: String) {
+        stopSimulation()
+        viewModelScope.launch {
+            try {
+                val node = api.getRandomNode(zone)
+                val prev = _state.value
+                _state.value = NavigationState(
+                    // Preserve data that shouldn't be wiped on reset
+                    amenityTypes = prev.amenityTypes,
+                    amenities = prev.amenities,
+                    accessibilityMode = prev.accessibilityMode,
+                    activeTypeFilters = prev.activeTypeFilters,
+                    dropdownTypeFilter = prev.dropdownTypeFilter,
+                    restroomGenderFilter = prev.restroomGenderFilter,
+                    // New mock start
+                    userLocation = LatLng(node.latitude, node.longitude),
+                    currentZone = node.zone,
+                    currentInstruction = "Ready — pick a destination",
+                )
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(
+                    error = "Failed to get random $zone start: ${e.message}"
+                )
+            }
+        }
     }
 
     // ── Geometry helpers ───────────────────────────────────────────

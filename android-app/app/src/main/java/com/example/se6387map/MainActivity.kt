@@ -75,7 +75,6 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
-                    viewModel.setMockLocation()
                     viewModel.loadAmenityTypes()
                     viewModel.loadAmenities()
                 }
@@ -424,13 +423,27 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                     }
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Demo route button
-                    Button(
-                        onClick = { viewModel.fetchRoute(1262, 1769) },
+                    // Test-start buttons: drop the user at a random nav node
+                    // in the chosen zone. Each press picks a fresh node so we
+                    // can validate routing/filtering from many start points.
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A73E8))
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("Demo Route (1262 → 1769)", fontSize = 16.sp)
+                        Button(
+                            onClick = { viewModel.setMockStart("secure") },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A73E8))
+                        ) {
+                            Text("Start in Secure Area", fontSize = 14.sp)
+                        }
+                        Button(
+                            onClick = { viewModel.setMockStart("public") },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A73E8))
+                        ) {
+                            Text("Start in Public Area", fontSize = 14.sp)
+                        }
                     }
                 } else {
                     // ── Navigating: simulation controls ─────────────────

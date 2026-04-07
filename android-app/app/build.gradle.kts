@@ -15,6 +15,41 @@ val apiBaseUrl: String = localProperties.getProperty("API_BASE_URL")
     ?: (project.findProperty("API_BASE_URL") as String?)
     ?: "http://10.0.2.2:5000/"
 
+// We generate a small ApiConfig.kt at configuration time instead of
+// using AGP's `buildConfigField` / `BuildConfig` class. Reason: Android
+// Studio has a long-standing indexing bug where the generated BuildConfig
+// class shows up as "Unresolved reference" in the editor even though the
+// compiler finds it fine.
+//
+// Doing the write during *configuration* (not inside a task) guarantees
+// the file exists the moment Gradle sync finishes — before the IDE
+// indexes sources. That means a fresh clone / sync works with zero
+// "Unresolved reference 'ApiConfig'" errors, no build required first.
+// The local.properties override still works identically.
+val generatedConfigDir: java.io.File =
+    layout.buildDirectory.dir("generated/source/apiconfig/main").get().asFile
+
+run {
+    val pkgDir = generatedConfigDir.resolve("com/example/se6387map")
+    pkgDir.mkdirs()
+    val file = pkgDir.resolve("ApiConfig.kt")
+    val contents =
+        """
+        // Generated at build time. Do not edit.
+        // Source of truth: local.properties -> API_BASE_URL
+        package com.example.se6387map
+
+        object ApiConfig {
+            const val BASE_URL = "$apiBaseUrl"
+        }
+        """.trimIndent() + "\n"
+    // Only rewrite if contents changed, so we don't trigger needless
+    // incremental rebuilds on every sync.
+    if (!file.exists() || file.readText() != contents) {
+        file.writeText(contents)
+    }
+}
+
 android {
     namespace = "com.example.se6387map"
     compileSdk {
@@ -30,8 +65,6 @@ android {
         versionCode = 1
         versionName = "1.0"
         manifestPlaceholders["MAPS_API_KEY"] = project.findProperty("MAPS_API_KEY") ?: ""
-
-        buildConfigField("String", "API_BASE_URL", "\"$apiBaseUrl\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -51,8 +84,9 @@ android {
     }
     buildFeatures {
         compose = true
-        buildConfig = true
     }
+
+    sourceSets["main"].kotlin.srcDir(generatedConfigDir)
 }
 
 dependencies {

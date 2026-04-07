@@ -55,6 +55,56 @@ def bearing_to_cardinal(bearing):
     return directions[index]
 
 
+# ── Amenity derived-zone fix ───────────────────────────────────────────
+# Synthetic "linker" nav_nodes (node_type in 'amenity'/'elevator'/
+# 'escalator'/'checkpoint') were bulk-inserted with zone='public', but
+# many physically sit on the secure side of TSA. We can't edit the DB, so
+# we derive each amenity's true zone in SQL.
+#
+# Two-tier rule:
+#   1. Count its neighbors that are real waypoints (node_type='waypoint').
+#      Other linkers are untrustworthy — their stored zone is the very
+#      thing we're trying to correct — so we skip them.
+#   2. If there's a clear majority among real-waypoint neighbors, use it.
+#   3. Otherwise (tie, or the amenity is on a "linker island" whose only
+#      edges go to other linkers — Whataburger, 3Sixty Duty Free, the
+#      stranded Elevator_D34), fall back to the physically nearest real
+#      waypoint's zone. Final fallback is the stored zone.
+#
+# Regular waypoint-anchored amenities are unaffected: their waypoint
+# neighbors share the correct stored zone.
+#
+# Drop these fragments into any query whose FROM clause is
+# `amenities a LEFT JOIN nav_nodes n ON n.id = a.nodeid`.
+AMENITY_DERIVED_ZONE_JOIN = """
+LEFT JOIN LATERAL (
+    SELECT SUM(CASE WHEN n2.zone = 'secure' THEN 1 ELSE 0 END) AS secure_n,
+           SUM(CASE WHEN n2.zone = 'public' THEN 1 ELSE 0 END) AS public_n
+    FROM nav_edges e
+    JOIN nav_nodes n2
+      ON n2.id = CASE WHEN e.from_node = a.nodeid THEN e.to_node ELSE e.from_node END
+    WHERE (e.from_node = a.nodeid OR e.to_node = a.nodeid)
+      AND n2.node_type = 'waypoint'
+) nbr ON TRUE
+LEFT JOIN LATERAL (
+    SELECT n3.zone AS nearest_zone
+    FROM nav_nodes n3
+    WHERE n3.node_type = 'waypoint'
+      AND n3.lat IS NOT NULL AND n.lat IS NOT NULL
+    ORDER BY ((n3.lat - n.lat) * (n3.lat - n.lat) +
+              (n3.lng - n.lng) * (n3.lng - n.lng)) ASC
+    LIMIT 1
+) nearest ON TRUE
+"""
+AMENITY_DERIVED_ZONE_EXPR = """
+CASE
+    WHEN COALESCE(nbr.secure_n, 0) > COALESCE(nbr.public_n, 0) THEN 'secure'
+    WHEN COALESCE(nbr.public_n, 0) > COALESCE(nbr.secure_n, 0) THEN 'public'
+    ELSE COALESCE(nearest.nearest_zone, n.zone, 'public')
+END
+"""
+
+
 def haversine_distance_meters(lat1, lng1, lat2, lng2):
     """Calculate distance between two lat/lng points in meters using the haversine formula."""
     R = 6371000  # Earth radius in meters
@@ -462,7 +512,7 @@ def get_amenities():
         # for marker placement AND routing snaps to amenity.nodeid, so both
         # must live in the same coordinate frame as nav_nodes. Fall back to
         # the raw amenity coords if the linkage is somehow missing.
-        c.execute("""
+        c.execute(f"""
             SELECT a.id,
                    a.nodeid,
                    a.name,
@@ -471,9 +521,11 @@ def get_amenities():
                    COALESCE(n.lng, a.longitude) AS longitude,
                    a.status,
                    a.wheelchairaccessible,
-                   (LOWER(COALESCE(a.wheelchairaccessible, '')) = 'yes') AS has_accessible_unit
+                   (LOWER(COALESCE(a.wheelchairaccessible, '')) = 'yes') AS has_accessible_unit,
+                   {AMENITY_DERIVED_ZONE_EXPR} AS zone
             FROM amenities a
             LEFT JOIN nav_nodes n ON n.id = a.nodeid
+            {AMENITY_DERIVED_ZONE_JOIN}
             ORDER BY a.type, a.name
         """)
         amenities = c.fetchall()
@@ -482,6 +534,63 @@ def get_amenities():
     except Exception as e:
         import traceback
         traceback.print_exc()
+        databaseConnection.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/random-node', methods=['GET'])
+def get_random_node():
+    """Return a random nav node in the requested zone.
+
+    Used by the Android app's "Start in Secure Area" / "Start in Public Area"
+    test buttons so each press drops the user at a different starting point.
+
+    Restricted to `node_type='waypoint'` (linkers are synthetic attachments,
+    not walkable positions). On top of that, a small number of waypoints
+    have a stored zone that disagrees with their physical surroundings —
+    e.g. nodes 6841 and 6940 are stamped 'public' but every neighboring
+    waypoint is secure. Picking one of those at random would drop the user
+    in the wrong concourse, and any subsequent route into the user's
+    intended zone would fail because no edge crosses the TSA boundary.
+    We exclude them with the same neighbor-consensus check we use for
+    amenities: a waypoint qualifies only if at least as many waypoint
+    neighbors agree with its stored zone as disagree.
+
+    Query params:
+        zone: 'secure' or 'public' (required)
+    """
+    zone = request.args.get('zone', type=str)
+    if zone not in ('secure', 'public'):
+        return jsonify({'error': "zone must be 'secure' or 'public'"}), 400
+    try:
+        c = databaseConnection.cursor()
+        c.execute("""
+            SELECT n.id AS node_id,
+                   n.lat AS latitude,
+                   n.lng AS longitude,
+                   n.zone
+            FROM nav_nodes n
+            LEFT JOIN LATERAL (
+                SELECT SUM(CASE WHEN n2.zone = n.zone THEN 1 ELSE 0 END) AS same_n,
+                       SUM(CASE WHEN n2.zone <> n.zone THEN 1 ELSE 0 END) AS diff_n
+                FROM nav_edges e
+                JOIN nav_nodes n2
+                  ON n2.id = CASE WHEN e.from_node = n.id THEN e.to_node ELSE e.from_node END
+                WHERE (e.from_node = n.id OR e.to_node = n.id)
+                  AND n2.node_type = 'waypoint'
+            ) nbr ON TRUE
+            WHERE n.node_type = 'waypoint'
+              AND n.zone = %s
+              AND COALESCE(nbr.same_n, 0) >= COALESCE(nbr.diff_n, 0)
+            ORDER BY random()
+            LIMIT 1
+        """, (zone,))
+        row = c.fetchone()
+        c.close()
+        if not row:
+            return jsonify({'error': f'No waypoint nodes found in zone {zone}'}), 404
+        return jsonify(row)
+    except Exception as e:
         databaseConnection.rollback()
         return jsonify({'error': str(e)}), 500
 
@@ -530,18 +639,22 @@ def route_to_amenity():
 
         # Get all amenities of the requested type whose linked nav_node is in the
         # SAME zone as the starting node. Secure-side users can only reach secure
-        # amenities; public-side users can only reach public ones.
+        # amenities; public-side users can only reach public ones. Uses the
+        # derived zone (see AMENITY_DERIVED_ZONE_* at the top of this file)
+        # because some linker nodes have a stale stored zone.
         if accessible:
             # Build 1: amenityUnits table is empty, so filter directly by the
             # amenity-level accessibility flag.
-            cur.execute("""
+            cur.execute(f"""
                 SELECT a.id AS amenity_id, a.nodeID, a.name, a.type,
                        a.latitude, a.longitude,
                        n.lat AS node_lat, n.lng AS node_lng,
-                       n.zone AS node_zone
+                       {AMENITY_DERIVED_ZONE_EXPR} AS node_zone
                 FROM amenities a
                 JOIN nav_nodes n ON n.id = a.nodeID
-                WHERE a.type = %s AND COALESCE(n.zone, 'public') = %s
+                {AMENITY_DERIVED_ZONE_JOIN}
+                WHERE a.type = %s
+                  AND {AMENITY_DERIVED_ZONE_EXPR} = %s
                   AND LOWER(COALESCE(a.wheelchairaccessible, '')) = 'yes'
             """, (amenity_type, start_zone))
             candidates = cur.fetchall()
@@ -551,14 +664,16 @@ def route_to_amenity():
                     'error': f'No accessible {amenity_type} reachable from your zone ({start_zone})'
                 }), 404
         else:
-            cur.execute("""
+            cur.execute(f"""
                 SELECT a.id AS amenity_id, a.nodeID, a.name, a.type,
                        a.latitude, a.longitude,
                        n.lat AS node_lat, n.lng AS node_lng,
-                       n.zone AS node_zone
+                       {AMENITY_DERIVED_ZONE_EXPR} AS node_zone
                 FROM amenities a
                 JOIN nav_nodes n ON n.id = a.nodeID
-                WHERE a.type = %s AND COALESCE(n.zone, 'public') = %s
+                {AMENITY_DERIVED_ZONE_JOIN}
+                WHERE a.type = %s
+                  AND {AMENITY_DERIVED_ZONE_EXPR} = %s
             """, (amenity_type, start_zone))
             candidates = cur.fetchall()
 

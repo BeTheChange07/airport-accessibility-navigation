@@ -1,6 +1,10 @@
+// Data classes mirror the Flask JSON exactly, so they keep snake_case
+// field names. Suppress the Kotlin style checks for this file rather
+// than renaming + annotating every field with @SerializedName.
+@file:Suppress("PropertyName", "ConstructorParameterNaming")
+
 package com.example.se6387map
 
-import com.example.se6387map.BuildConfig
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
@@ -69,7 +73,15 @@ data class Amenity(
     val longitude: Double,
     val status: String,
     val wheelchairaccessible: String?,
-    val has_accessible_unit: Boolean?
+    val has_accessible_unit: Boolean?,
+    val zone: String? = null
+)
+
+data class RandomNodeResponse(
+    val node_id: Int,
+    val latitude: Double,
+    val longitude: Double,
+    val zone: String
 )
 
 data class AmenitiesResponse(
@@ -92,6 +104,8 @@ interface NavigationApiService {
         @Query("zone") zone: String? = null
     ): NearestNodeResponse
 
+    // Kept for ad-hoc debugging / future use — don't flag as unused.
+    @Suppress("unused")
     @GET("/api/nodes")
     suspend fun getNodes(
         @Query("type") type: String? = null
@@ -109,11 +123,18 @@ interface NavigationApiService {
         @Query("amenity_type") amenityType: String,
         @Query("accessible") accessible: Boolean? = null
     ): RouteResponse
+
+    @GET("/api/random-node")
+    suspend fun getRandomNode(
+        @Query("zone") zone: String
+    ): RandomNodeResponse
 }
 
 // Singleton to create the API client
 object NavigationApi {
-    private val BASE_URL = BuildConfig.API_BASE_URL
+    // Generated at build time from local.properties by the
+    // `generateApiConfig` gradle task. See app/build.gradle.kts.
+    private val BASE_URL = ApiConfig.BASE_URL
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
