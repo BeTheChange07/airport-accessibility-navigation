@@ -309,6 +309,44 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
             )
         }
 
+        // ── Cross-zone confirm dialog ──────────────────────────────
+        // Belt-and-suspenders: the amenity list filter usually prevents the
+        // user from picking a wrong-zone destination, but if anything ever
+        // surfaces one (stale selection, future code path), the ViewModel
+        // parks the request in pendingCrossZoneAmenity and we show this
+        // dialog. Continuing routes through the TSA checkpoint edges; the
+        // user is told what that means.
+        state.pendingCrossZoneAmenity?.let { amenity ->
+            val destZone = amenity.zone ?: "other"
+            val startZone = state.currentZone ?: "other"
+            val implication = if (destZone == "secure")
+                "you'll need to clear TSA security to reach it"
+            else
+                "you'll need to exit the secure area, and you'd have to " +
+                    "re-clear TSA to come back"
+            AlertDialog(
+                onDismissRequest = { viewModel.cancelCrossZoneRoute() },
+                title = { Text("Different zone") },
+                text = {
+                    Text(
+                        "${amenity.name} is in the $destZone area, but " +
+                            "you're in the $startZone area. To reach it, " +
+                            "$implication. Continue anyway?"
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.confirmCrossZoneRoute() }) {
+                        Text("Continue")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { viewModel.cancelCrossZoneRoute() }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+
         // ── Browse amenities bottom sheet ──────────────────────────
         if (state.showAmenityList) {
             AmenityListSheet(
@@ -353,75 +391,94 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                         modifier = Modifier.padding(bottom = 12.dp)
                     )
 
-                    // Filters section
-                    FiltersSection(state = state, viewModel = viewModel)
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Amenity type dropdown (filters the map to a single type)
-                    if (state.amenityTypes.isNotEmpty()) {
-                        AmenityDropdown(
-                            amenityTypes = state.amenityTypes,
-                            selected = state.dropdownTypeFilter,
-                            onSelect = { viewModel.setDropdownTypeFilter(it) },
-                            onClear = { viewModel.setDropdownTypeFilter(null) }
-                        )
+                    if (state.currentZone != null) {
+                        // ── Zone selected: show full picker ─────────────
+                        // Filters section
+                        FiltersSection(state = state, viewModel = viewModel)
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        // Restroom gender sub-filter
-                        if (state.dropdownTypeFilter == "restroom") {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                FilterChip(
-                                    selected = state.restroomGenderFilter == RestroomGender.ANY,
-                                    onClick = { viewModel.setRestroomGender(RestroomGender.ANY) },
-                                    label = { Text("Any") }
-                                )
-                                FilterChip(
-                                    selected = state.restroomGenderFilter == RestroomGender.MALE,
-                                    onClick = { viewModel.setRestroomGender(RestroomGender.MALE) },
-                                    label = { Text("Male") }
-                                )
-                                FilterChip(
-                                    selected = state.restroomGenderFilter == RestroomGender.FEMALE,
-                                    onClick = { viewModel.setRestroomGender(RestroomGender.FEMALE) },
-                                    label = { Text("Female") }
-                                )
-                            }
+                        // Amenity type dropdown (filters the map to a single type)
+                        if (state.amenityTypes.isNotEmpty()) {
+                            AmenityDropdown(
+                                amenityTypes = state.amenityTypes,
+                                selected = state.dropdownTypeFilter,
+                                onSelect = { viewModel.setDropdownTypeFilter(it) },
+                                onClear = { viewModel.setDropdownTypeFilter(null) }
+                            )
                             Spacer(modifier = Modifier.height(8.dp))
+
+                            // Restroom gender sub-filter
+                            if (state.dropdownTypeFilter == "restroom") {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    FilterChip(
+                                        selected = state.restroomGenderFilter == RestroomGender.ANY,
+                                        onClick = { viewModel.setRestroomGender(RestroomGender.ANY) },
+                                        label = { Text("Any") }
+                                    )
+                                    FilterChip(
+                                        selected = state.restroomGenderFilter == RestroomGender.MALE,
+                                        onClick = { viewModel.setRestroomGender(RestroomGender.MALE) },
+                                        label = { Text("Male") }
+                                    )
+                                    FilterChip(
+                                        selected = state.restroomGenderFilter == RestroomGender.FEMALE,
+                                        onClick = { viewModel.setRestroomGender(RestroomGender.FEMALE) },
+                                        label = { Text("Female") }
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(8.dp))
+                            }
+
+                            // Route-to-nearest button (only when a type is selected)
+                            if (state.dropdownTypeFilter != null) {
+                                Button(
+                                    onClick = {
+                                        val type = state.dropdownTypeFilter
+                                        if (type == "restroom" &&
+                                            state.restroomGenderFilter != RestroomGender.ANY
+                                        ) {
+                                            viewModel.routeToNearestFilteredRestroom()
+                                        } else if (type != null) {
+                                            viewModel.routeToAmenity(type)
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A73E8))
+                                ) {
+                                    Text("Route to nearest", fontSize = 16.sp)
+                                }
+                                Spacer(modifier = Modifier.height(8.dp))
+                            }
                         }
 
-                        // Route-to-nearest button (only when a type is selected)
-                        if (state.dropdownTypeFilter != null) {
-                            Button(
-                                onClick = {
-                                    val type = state.dropdownTypeFilter
-                                    if (type == "restroom" &&
-                                        state.restroomGenderFilter != RestroomGender.ANY
-                                    ) {
-                                        viewModel.routeToNearestFilteredRestroom()
-                                    } else if (type != null) {
-                                        viewModel.routeToAmenity(type)
-                                    }
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A73E8))
-                            ) {
-                                Text("Route to nearest", fontSize = 16.sp)
-                            }
-                            Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = { viewModel.toggleAmenityList() },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF34A853))
+                        ) {
+                            Text("Browse Amenities", fontSize = 16.sp)
                         }
+                        Spacer(modifier = Modifier.height(8.dp))
+                    } else {
+                        // ── No zone yet: prompt the user to pick one ────
+                        // Hiding the picker controls until currentZone is set
+                        // is what enforces the rule "you can never start a
+                        // route from the wrong zone" — there's no way to
+                        // initiate a route at all until the user explicitly
+                        // chooses public or secure.
+                        Text(
+                            text = "Pick your starting area to begin.",
+                            fontSize = 14.sp,
+                            color = Color.Gray,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 12.dp)
+                        )
                     }
-
-                    Button(
-                        onClick = { viewModel.toggleAmenityList() },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF34A853))
-                    ) {
-                        Text("Browse Amenities", fontSize = 16.sp)
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
 
                     // Test-start buttons: drop the user at a random nav node
                     // in the chosen zone. Each press picks a fresh node so we

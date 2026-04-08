@@ -54,6 +54,10 @@ data class NavigationState(
     // Single-type focus from the dropdown (separate from chip multi-select)
     val dropdownTypeFilter: String? = null,
     val restroomGenderFilter: RestroomGender = RestroomGender.ANY,
+    // Set when the user picks an amenity in a different zone than currentZone.
+    // The UI shows a confirm dialog warning that they'd have to clear/exit
+    // TSA, and the request is parked here until they confirm or cancel.
+    val pendingCrossZoneAmenity: Amenity? = null,
 )
 
 fun filteredAmenities(state: NavigationState): List<Amenity> = state.amenities.filter { a ->
@@ -63,9 +67,11 @@ fun filteredAmenities(state: NavigationState): List<Amenity> = state.amenities.f
         a.has_accessible_unit == true ||
         a.wheelchairaccessible.equals("yes", ignoreCase = true)
     // Only show amenities that live in the same zone as the user's current
-    // starting point. Until the user picks a start location, currentZone is
-    // null and we don't filter by zone.
-    val zoneOk = state.currentZone == null || a.zone == state.currentZone
+    // starting point. Until the user picks a start location (Start in Public
+    // / Start in Secure), hide every amenity. Showing them all would let the
+    // user pick a destination before we know which side of TSA they're on,
+    // which is exactly how the "route starts in the wrong zone" bug happens.
+    val zoneOk = state.currentZone != null && a.zone == state.currentZone
     val genderOk = if (state.dropdownTypeFilter == "restroom" &&
         state.restroomGenderFilter != RestroomGender.ANY
     ) {
@@ -172,6 +178,18 @@ class NavigationViewModel : ViewModel() {
 
     fun routeToSpecificAmenity(amenity: Amenity) {
         val currentLocation = _state.value.userLocation ?: return
+        val zone = _state.value.currentZone
+        // Cross-zone guard. The list filter usually prevents this from being
+        // reachable, but we double-check at route time so a stale selection
+        // or a future code path can't silently produce a route through TSA.
+        if (zone != null && amenity.zone != null && amenity.zone != zone) {
+            _state.value = _state.value.copy(pendingCrossZoneAmenity = amenity)
+            return
+        }
+        executeRouteToAmenity(amenity, currentLocation)
+    }
+
+    private fun executeRouteToAmenity(amenity: Amenity, currentLocation: LatLng) {
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
@@ -194,6 +212,30 @@ class NavigationViewModel : ViewModel() {
         }
     }
 
+    /**
+     * User saw the cross-zone confirm dialog and chose to bail. Just clear
+     * the parked amenity; nothing else to undo.
+     */
+    fun cancelCrossZoneRoute() {
+        _state.value = _state.value.copy(pendingCrossZoneAmenity = null)
+    }
+
+    /**
+     * User saw the cross-zone confirm dialog and chose to proceed anyway.
+     * The starting node stays anchored in the user's current zone (so the
+     * route literally starts where they are), and pgRouting will walk the
+     * cross-zone edges through the TSA checkpoint to reach the destination.
+     * We deliberately do NOT bump currentZone here — the user hasn't
+     * physically crossed TSA, they're just being shown the path.
+     */
+    fun confirmCrossZoneRoute() {
+        val amenity = _state.value.pendingCrossZoneAmenity ?: return
+        val currentLocation = _state.value.userLocation
+        _state.value = _state.value.copy(pendingCrossZoneAmenity = null)
+        if (currentLocation == null) return
+        executeRouteToAmenity(amenity, currentLocation)
+    }
+
     // ── Route to specific amenity type ─────────────────────────────
 
     fun routeToAmenity(amenityType: String) {
@@ -203,8 +245,12 @@ class NavigationViewModel : ViewModel() {
                 isLoading = true, error = null, selectedAmenityType = amenityType
             )
             try {
-                // First find the nearest node to simulated position
-                val nearest = api.getNearestNode(currentLocation.latitude, currentLocation.longitude)
+                // First find the nearest node to simulated position. Constrain
+                // it to the user's current zone so the type-based "Route to
+                // nearest" can never snap onto a node on the other side of TSA.
+                val nearest = api.getNearestNode(
+                    currentLocation.latitude, currentLocation.longitude, _state.value.currentZone
+                )
                 // Remember this node's zone so off-path recalcs stay airside/landside-correct
                 _state.value = _state.value.copy(currentZone = nearest.zone)
                 // Then route to nearest amenity of that type
@@ -440,7 +486,7 @@ class NavigationViewModel : ViewModel() {
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
-                val nearest = api.getNearestNode(lat, lng)
+                val nearest = api.getNearestNode(lat, lng, _state.value.currentZone)
                 _state.value = _state.value.copy(currentZone = nearest.zone)
                 fetchRoute(nearest.node_id, destinationNode)
             } catch (e: Exception) {
