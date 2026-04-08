@@ -481,7 +481,8 @@ def get_nodes():
 def get_edges():
     """Return all nav_edges for visualization."""
     try:
-        cur.execute("""
+        c = databaseConnection.cursor()
+        c.execute("""
             SELECT e.id, e.from_node, e.to_node, e.distance, e.direction,
                    n1.lat AS from_lat, n1.lng AS from_lng,
                    n2.lat AS to_lat, n2.lng AS to_lng
@@ -489,7 +490,8 @@ def get_edges():
             JOIN nav_nodes n1 ON n1.id = e.from_node
             JOIN nav_nodes n2 ON n2.id = e.to_node
         """)
-        edges = cur.fetchall()
+        edges = c.fetchall()
+        c.close()
         return jsonify({'edges': list(edges)})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -504,12 +506,13 @@ def get_amenities():
     table is empty, so this is computed directly from a.wheelchairaccessible.
     """
     try:
+        c = databaseConnection.cursor()
         # Return the LINKED nav_node's lat/lng (calibrated frame), not the
         # raw CSV lat/lng on the amenities row. The client uses these coords
         # for marker placement AND routing snaps to amenity.nodeid, so both
         # must live in the same coordinate frame as nav_nodes. Fall back to
         # the raw amenity coords if the linkage is somehow missing.
-        cur.execute(f"""
+        c.execute(f"""
             SELECT a.id,
                    a.nodeid,
                    a.name,
@@ -525,7 +528,8 @@ def get_amenities():
             {AMENITY_DERIVED_ZONE_JOIN}
             ORDER BY a.type, a.name
         """)
-        amenities = cur.fetchall()
+        amenities = c.fetchall()
+        c.close()
         return jsonify({'amenities': list(amenities)})
     except Exception as e:
         import traceback
@@ -559,7 +563,8 @@ def get_random_node():
     if zone not in ('secure', 'public'):
         return jsonify({'error': "zone must be 'secure' or 'public'"}), 400
     try:
-        cur.execute("""
+        c = databaseConnection.cursor()
+        c.execute("""
             SELECT n.id AS node_id,
                    n.lat AS latitude,
                    n.lng AS longitude,
@@ -580,7 +585,8 @@ def get_random_node():
             ORDER BY random()
             LIMIT 1
         """, (zone,))
-        row = cur.fetchone()
+        row = c.fetchone()
+        c.close()
         if not row:
             return jsonify({'error': f'No waypoint nodes found in zone {zone}'}), 404
         return jsonify(row)
