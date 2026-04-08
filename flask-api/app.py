@@ -176,6 +176,8 @@ def health():
         return jsonify({'status': 'ok', 'database': 'connected'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+    finally:
+        databaseConnection.commit()
 
 
 def routeHelperFunctionInQueryDijkstraReplacement(fromNode: int, toNode: int) -> list[dict[str, Any]]:
@@ -240,6 +242,7 @@ def routeHelperFunctionInQueryDijkstraReplacement(fromNode: int, toNode: int) ->
         JOIN nav_nodes n ON n.id = pn.node_id
         ORDER BY pn.seq;
     """, (node_ids,))
+    databaseConnection.commit()
     return cur.fetchall()
     
 @app.route('/api/route', methods=['GET'])
@@ -338,6 +341,9 @@ def get_route():
     except Exception as e:
         #raise #TODO comment out, this is just here for testing to effectively disable the except block so it will actually propogate the error up the chain for debugging
         return jsonify({'error': str(e)}), 500
+    
+    finally:
+        databaseConnection.commit()
 
 
 @app.route('/api/nearest', methods=['GET'])
@@ -402,11 +408,9 @@ def nearest_node():
             WHERE id = %s
             LIMIT 1
         """, (nearest_node_id, )) #Comma to make it a tuple and not just a parenthesized expression
-        print("executed rds query")
 
         node = cur.fetchone()
 
-        print(node)
 
         if not node:
             return jsonify({'error': 'No nodes found'}), 404
@@ -423,6 +427,9 @@ def nearest_node():
     except Exception as e:
         #raise #This is just here for testing to effectively disable the except block so it will actually propogate the error up the chain for debugging
         return jsonify({'error': str(e)}), 500
+    
+    finally:
+        databaseConnection.commit()
         
 @app.route('/api/nodes', methods=['GET'])
 def get_nodes():
@@ -475,6 +482,9 @@ def get_nodes():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    
+    finally:
+        databaseConnection.commit()
 
 
 @app.route('/api/edges', methods=['GET'])
@@ -493,6 +503,8 @@ def get_edges():
         return jsonify({'edges': list(edges)})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    finally:
+        databaseConnection.commit()
 
 
 @app.route('/api/amenities', methods=['GET'])
@@ -532,6 +544,8 @@ def get_amenities():
         traceback.print_exc()
         databaseConnection.rollback()
         return jsonify({'error': str(e)}), 500
+    finally:
+        databaseConnection.commit()
 
 
 @app.route('/api/random-node', methods=['GET'])
@@ -587,6 +601,8 @@ def get_random_node():
     except Exception as e:
         databaseConnection.rollback()
         return jsonify({'error': str(e)}), 500
+    finally:
+        databaseConnection.commit()
 
 
 @app.route('/api/amenity-types', methods=['GET'])
@@ -603,6 +619,8 @@ def get_amenity_types():
         return jsonify({'amenity_types': types})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    finally:
+        databaseConnection.commit()
 
 
 @app.route('/api/route-to-amenity', methods=['GET'])
@@ -772,6 +790,8 @@ def route_to_amenity():
     except Exception as e:
         databaseConnection.rollback()
         return jsonify({'error': str(e)}), 500
+    finally:
+        databaseConnection.commit()
 
 
 if __name__ == '__main__':
