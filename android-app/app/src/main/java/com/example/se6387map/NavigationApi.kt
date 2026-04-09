@@ -1,6 +1,4 @@
-// Data classes mirror the Flask JSON exactly, so they keep snake_case
-// field names. Suppress the Kotlin style checks for this file rather
-// than renaming + annotating every field with @SerializedName.
+// Snake_case fields match the Flask JSON; suppress Kotlin naming checks.
 @file:Suppress("PropertyName", "ConstructorParameterNaming")
 
 package com.example.se6387map
@@ -12,14 +10,13 @@ import retrofit2.http.Query
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
-// Data classes matching your Flask API responses
 data class RouteResponse(
     val from_node: Int,
     val to_node: Int,
     val total_distance: Double,
     val num_waypoints: Int,
     val waypoints: List<Waypoint>,
-    // Present only in route-to-amenity responses
+    // Only set on route-to-amenity responses.
     val amenity_type: String? = null,
     val destination_name: String? = null
 )
@@ -88,7 +85,6 @@ data class AmenitiesResponse(
     val amenities: List<Amenity>
 )
 
-// Retrofit API interface
 interface NavigationApiService {
 
     @GET("/api/route")
@@ -104,7 +100,7 @@ interface NavigationApiService {
         @Query("zone") zone: String? = null
     ): NearestNodeResponse
 
-    // Kept for ad-hoc debugging / future use — don't flag as unused.
+    // Kept for ad-hoc debugging.
     @Suppress("unused")
     @GET("/api/nodes")
     suspend fun getNodes(
@@ -130,10 +126,8 @@ interface NavigationApiService {
     ): RandomNodeResponse
 }
 
-// Singleton to create the API client
 object NavigationApi {
-    // Generated at build time from local.properties by the
-    // `generateApiConfig` gradle task. See app/build.gradle.kts.
+    // ApiConfig is generated from local.properties by the generateApiConfig gradle task.
     private val BASE_URL = ApiConfig.BASE_URL
 
     private val client = OkHttpClient.Builder()

@@ -1,15 +1,10 @@
-"""Unit tests for pure helper functions in app.py.
-
-These tests do NOT touch the database — they only exercise math helpers.
-Run with `pytest flask-api/test_app.py`.
-"""
+"""Unit tests for pure helper functions in app.py."""
 
 import math
 import os
 import sys
 
-# Stub DB env vars and psycopg2.connect so importing app.py doesn't try to
-# open a real connection.
+# Stub env + psycopg2.connect so importing app.py doesn't open a real DB.
 os.environ.setdefault("DB_HOST", "localhost")
 os.environ.setdefault("DB_NAME", "test")
 os.environ.setdefault("DB_USER", "test")
@@ -17,7 +12,7 @@ os.environ.setdefault("DB_PASSWORD", "test")
 
 import types  # noqa: E402
 
-# Stub out NearestNodeFinder so we don't need numpy/scipy to import app.py
+# Stub NearestNodeFinder so we don't need numpy/scipy.
 _fake_nnf_module = types.ModuleType("NearestNodeFinder")
 class _FakeNNF:
     def __init__(self, *a, **kw): pass
@@ -77,7 +72,6 @@ def test_bearing_to_cardinal_cardinals():
     assert bearing_to_cardinal(225) == "SW"
     assert bearing_to_cardinal(270) == "W"
     assert bearing_to_cardinal(315) == "NW"
-    # Rounds to nearest
     assert bearing_to_cardinal(22) == "N"
     assert bearing_to_cardinal(23) == "NE"
 
@@ -87,7 +81,7 @@ def test_haversine_zero_distance():
 
 
 def test_haversine_approx_one_degree_lat():
-    # 1 degree latitude ≈ 111 km
+    # 1 degree latitude is about 111 km.
     d = haversine_distance_meters(0.0, 0.0, 1.0, 0.0)
     assert 110_000 < d < 112_000
 
@@ -99,7 +93,6 @@ def test_haversine_symmetry():
 
 
 def test_direction_instruction_first_step():
-    # No previous direction → "Head ..."
     assert get_direction_instruction(1, 2, None, "N") == "Head N"
 
 
@@ -108,15 +101,12 @@ def test_direction_instruction_straight():
 
 
 def test_direction_instruction_right_turn():
-    # N → E is a right turn
     assert get_direction_instruction(1, 2, "N", "E") == "Turn right"
 
 
 def test_direction_instruction_left_turn():
-    # N → W is a left turn
     assert get_direction_instruction(1, 2, "N", "W") == "Turn left"
 
 
 def test_direction_instruction_u_turn():
-    # N → S is a turn-around
     assert get_direction_instruction(1, 2, "N", "S") == "Turn around"

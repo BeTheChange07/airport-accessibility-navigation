@@ -136,7 +136,7 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // ── Google Map ─────────────────────────────────────────────
+        // Google Map
         GoogleMap(
             modifier = Modifier.fillMaxSize(),
             cameraPositionState = cameraPositionState,
@@ -150,7 +150,6 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                 indoorLevelPickerEnabled = true
             )
         ) {
-            // Draw navigation route polyline
             if (state.routePoints.isNotEmpty()) {
                 Polyline(
                     points = state.routePoints,
@@ -181,8 +180,7 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                     }
                     val pos = LatLng(amenity.latitude, amenity.longitude)
                     val markerState = rememberMarkerState(position = pos)
-                    // rememberMarkerState's `position` is initial-only; force-sync it
-                    // each recomposition so filtering doesn't leave a stale LatLng behind.
+                    // Force-sync position so filtering doesn't leave a stale LatLng.
                     markerState.position = pos
                     Marker(
                         state = markerState,
@@ -217,7 +215,7 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
             }
         }
 
-        // ── HUD Card (top) ─────────────────────────────────────────
+        // HUD card (top)
         if (state.isNavigating || state.isSimulating) {
             Card(
                 modifier = Modifier
@@ -297,7 +295,7 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
             }
         }
 
-        // ── Amenity detail bottom sheet ────────────────────────────
+        // Amenity detail bottom sheet
         state.selectedAmenity?.let { amenity ->
             AmenityDetailSheet(
                 amenity = amenity,
@@ -309,13 +307,7 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
             )
         }
 
-        // ── Cross-zone confirm dialog ──────────────────────────────
-        // Belt-and-suspenders: the amenity list filter usually prevents the
-        // user from picking a wrong-zone destination, but if anything ever
-        // surfaces one (stale selection, future code path), the ViewModel
-        // parks the request in pendingCrossZoneAmenity and we show this
-        // dialog. Continuing routes through the TSA checkpoint edges; the
-        // user is told what that means.
+        // Fallback dialog if a cross-zone amenity ever slips past the filter.
         state.pendingCrossZoneAmenity?.let { amenity ->
             val destZone = amenity.zone ?: "other"
             val startZone = state.currentZone ?: "other"
@@ -347,7 +339,7 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
             )
         }
 
-        // ── Browse amenities bottom sheet ──────────────────────────
+        // Browse amenities bottom sheet
         if (state.showAmenityList) {
             AmenityListSheet(
                 amenities = filteredAmenities(state),
@@ -356,7 +348,7 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
             )
         }
 
-        // ── Bottom control panel ───────────────────────────────────
+        // Bottom control panel
         Card(
             modifier = Modifier
                 .fillMaxWidth()
@@ -383,7 +375,6 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                 }
 
                 if (!state.isNavigating && !state.isSimulating) {
-                    // ── Not navigating: show amenity picker + demo ──────
                     Text(
                         text = "Terminal D Navigation",
                         fontSize = 18.sp,
@@ -392,8 +383,6 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                     )
 
                     if (state.currentZone != null) {
-                        // ── Zone selected: show full picker ─────────────
-                        // Filters section
                         FiltersSection(state = state, viewModel = viewModel)
                         Spacer(modifier = Modifier.height(8.dp))
 
@@ -463,12 +452,7 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                     } else {
-                        // ── No zone yet: prompt the user to pick one ────
-                        // Hiding the picker controls until currentZone is set
-                        // is what enforces the rule "you can never start a
-                        // route from the wrong zone" — there's no way to
-                        // initiate a route at all until the user explicitly
-                        // chooses public or secure.
+                        // Hide picker until the user chooses a zone — prevents wrong-zone routes.
                         Text(
                             text = "Pick your starting area to begin.",
                             fontSize = 14.sp,
@@ -480,9 +464,7 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                         )
                     }
 
-                    // Test-start buttons: drop the user at a random nav node
-                    // in the chosen zone. Each press picks a fresh node so we
-                    // can validate routing/filtering from many start points.
+                    // Test buttons: drop the user at a random node in the chosen zone.
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -503,7 +485,6 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                         }
                     }
                 } else {
-                    // ── Navigating: simulation controls ─────────────────
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -560,8 +541,6 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
     }
 }
 
-// ── Amenity type dropdown ──────────────────────────────────────────
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AmenityDropdown(
@@ -610,8 +589,6 @@ fun AmenityDropdown(
         }
     }
 }
-
-// ── Filters section ────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
@@ -675,8 +652,6 @@ fun FiltersSection(state: NavigationState, viewModel: NavigationViewModel) {
     }
 }
 
-// ── Amenity detail sheet ───────────────────────────────────────────
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AmenityDetailSheet(amenity: Amenity, onRouteHere: () -> Unit, onClose: () -> Unit) {
@@ -711,8 +686,6 @@ fun AmenityDetailSheet(amenity: Amenity, onRouteHere: () -> Unit, onClose: () ->
         }
     }
 }
-
-// ── Amenity list sheet ─────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -772,18 +745,16 @@ fun AmenityListSheet(
     }
 }
 
-// ── Direction arrow drawn with Canvas ──────────────────────────────
-
 @Composable
 fun DirectionArrow() {
     Canvas(modifier = Modifier.size(36.dp)) {
         val w = size.width
         val h = size.height
         val path = Path().apply {
-            moveTo(w / 2f, 0f)          // top center (points up = North)
-            lineTo(w * 0.85f, h * 0.85f) // bottom right
-            lineTo(w / 2f, h * 0.6f)     // inner notch
-            lineTo(w * 0.15f, h * 0.85f) // bottom left
+            moveTo(w / 2f, 0f)
+            lineTo(w * 0.85f, h * 0.85f)
+            lineTo(w / 2f, h * 0.6f)
+            lineTo(w * 0.15f, h * 0.85f)
             close()
         }
         drawPath(path, color = Color.White)

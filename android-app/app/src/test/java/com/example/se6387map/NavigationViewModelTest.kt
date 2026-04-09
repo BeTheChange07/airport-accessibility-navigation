@@ -14,7 +14,8 @@ class NavigationViewModelTest {
         status: String = "open",
         accessibleUnit: Boolean? = null,
         wheelchairaccessible: String? = null,
-        name: String = "Amenity $id"
+        name: String = "Amenity $id",
+        zone: String = "secure"
     ) = Amenity(
         id = id,
         nodeid = 100 + id,
@@ -24,7 +25,8 @@ class NavigationViewModelTest {
         longitude = -97.0,
         status = status,
         wheelchairaccessible = wheelchairaccessible,
-        has_accessible_unit = accessibleUnit
+        has_accessible_unit = accessibleUnit,
+        zone = zone
     )
 
     @Test
@@ -33,7 +35,8 @@ class NavigationViewModelTest {
             amenities = listOf(
                 amenity(1, "restroom"),
                 amenity(2, "food")
-            )
+            ),
+            currentZone = "secure"
         )
         assertEquals(2, filteredAmenities(state).size)
     }
@@ -46,7 +49,8 @@ class NavigationViewModelTest {
                 amenity(2, "food"),
                 amenity(3, "restroom")
             ),
-            activeTypeFilters = setOf("restroom")
+            activeTypeFilters = setOf("restroom"),
+            currentZone = "secure"
         )
         val result = filteredAmenities(state)
         assertEquals(2, result.size)
@@ -60,7 +64,8 @@ class NavigationViewModelTest {
                 amenity(1, "restroom", accessibleUnit = true),
                 amenity(2, "restroom", accessibleUnit = false)
             ),
-            accessibilityMode = true
+            accessibilityMode = true,
+            currentZone = "secure"
         )
         val result = filteredAmenities(state)
         assertEquals(1, result.size)
@@ -74,7 +79,8 @@ class NavigationViewModelTest {
                 amenity(1, "food", wheelchairaccessible = "yes"),
                 amenity(2, "food", wheelchairaccessible = "no")
             ),
-            accessibilityMode = true
+            accessibilityMode = true,
+            currentZone = "secure"
         )
         val result = filteredAmenities(state)
         assertEquals(1, result.size)
@@ -85,7 +91,8 @@ class NavigationViewModelTest {
     fun filteredAmenities_accessibilityMode_caseInsensitive() {
         val state = NavigationState(
             amenities = listOf(amenity(1, "food", wheelchairaccessible = "YES")),
-            accessibilityMode = true
+            accessibilityMode = true,
+            currentZone = "secure"
         )
         assertEquals(1, filteredAmenities(state).size)
     }
@@ -99,14 +106,13 @@ class NavigationViewModelTest {
                 amenity(3, "food", accessibleUnit = true)
             ),
             activeTypeFilters = setOf("restroom"),
-            accessibilityMode = true
+            accessibilityMode = true,
+            currentZone = "secure"
         )
         val result = filteredAmenities(state)
         assertEquals(1, result.size)
         assertEquals(1, result[0].id)
     }
-
-    // ── pointToSegmentDistanceMeters ──
 
     @Test
     fun pointOnSegment_isZero() {
@@ -122,21 +128,17 @@ class NavigationViewModelTest {
     fun pointBeyondSegmentEnd_clampsToEndpoint() {
         val vm = NavigationViewModel()
         val a = LatLng(0.0, 0.0)
-        val b = LatLng(0.0, 0.001) // ~111 m east
-        // Point well past b
+        val b = LatLng(0.0, 0.001)
         val p = LatLng(0.0, 0.002)
         val d = vm.pointToSegmentDistanceMeters(p, a, b)
-        // Should equal distance from b to p (~111 m)
         assertTrue("expected ~111m, got $d", d in 100.0..120.0)
     }
 
     @Test
     fun pointPerpendicularToSegment_returnsPerpDistance() {
         val vm = NavigationViewModel()
-        // Segment along the equator, 1 degree long
         val a = LatLng(0.0, 0.0)
         val b = LatLng(0.0, 1.0)
-        // Point 1 degree north of the midpoint — ~111km away
         val p = LatLng(1.0, 0.5)
         val d = vm.pointToSegmentDistanceMeters(p, a, b)
         assertTrue("expected ~111km, got $d", d in 100_000.0..120_000.0)
@@ -151,8 +153,6 @@ class NavigationViewModelTest {
         assertTrue(d in 100.0..120.0)
     }
 
-    // ── Dropdown type filter + restroom gender sub-filter ──
-
     @Test
     fun filteredAmenities_dropdownTypeFilter_keepsOnlyThatType() {
         val state = NavigationState(
@@ -161,7 +161,8 @@ class NavigationViewModelTest {
                 amenity(2, "food", name = "Cafe"),
                 amenity(3, "restroom", name = "Female Bathroom")
             ),
-            dropdownTypeFilter = "restroom"
+            dropdownTypeFilter = "restroom",
+            currentZone = "secure"
         )
         val result = filteredAmenities(state)
         assertEquals(2, result.size)
@@ -176,7 +177,8 @@ class NavigationViewModelTest {
                 amenity(2, "restroom", name = "Female Bathroom")
             ),
             dropdownTypeFilter = "restroom",
-            restroomGenderFilter = RestroomGender.MALE
+            restroomGenderFilter = RestroomGender.MALE,
+            currentZone = "secure"
         )
         val result = filteredAmenities(state)
         assertEquals(1, result.size)
@@ -191,11 +193,12 @@ class NavigationViewModelTest {
                 amenity(2, "restroom", name = "Female Bathroom")
             ),
             dropdownTypeFilter = "restroom",
-            restroomGenderFilter = RestroomGender.FEMALE
+            restroomGenderFilter = RestroomGender.FEMALE,
+            currentZone = "secure"
         )
         val result = filteredAmenities(state)
         assertEquals(1, result.size)
-        // Verify "Female Bathroom" is NOT caught by a naive "male" substring check
+        // "Female" must not match a naive "male" substring check.
         assertEquals("Female Bathroom", result[0].name)
     }
 
@@ -207,7 +210,8 @@ class NavigationViewModelTest {
                 amenity(2, "restroom", name = "Female Bathroom")
             ),
             dropdownTypeFilter = "restroom",
-            restroomGenderFilter = RestroomGender.ANY
+            restroomGenderFilter = RestroomGender.ANY,
+            currentZone = "secure"
         )
         assertEquals(2, filteredAmenities(state).size)
     }
@@ -222,7 +226,8 @@ class NavigationViewModelTest {
             ),
             dropdownTypeFilter = "restroom",
             restroomGenderFilter = RestroomGender.MALE,
-            accessibilityMode = true
+            accessibilityMode = true,
+            currentZone = "secure"
         )
         val result = filteredAmenities(state)
         assertEquals(1, result.size)
@@ -233,7 +238,8 @@ class NavigationViewModelTest {
     fun accessibilityMode_doesNotFilter_whenOff() {
         val state = NavigationState(
             amenities = listOf(amenity(1, "food", accessibleUnit = false)),
-            accessibilityMode = false
+            accessibilityMode = false,
+            currentZone = "secure"
         )
         assertFalse(filteredAmenities(state).isEmpty())
     }

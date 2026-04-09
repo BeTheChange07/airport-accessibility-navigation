@@ -1,7 +1,4 @@
-"""
-Terminal D Navigation API
-Flask backend for DFW Terminal D turn-by-turn navigation
-"""
+"""Flask backend for DFW Terminal D turn-by-turn navigation."""
 
 import os
 import math
@@ -20,7 +17,6 @@ CORS(app)
 
 load_dotenv()
 
-# Database configuration
 DB_CONFIG = {
     'host': os.environ.get('DB_HOST'),
     'port': os.environ.get('DB_PORT', '5432'),
@@ -55,27 +51,9 @@ def bearing_to_cardinal(bearing):
     return directions[index]
 
 
-# ── Amenity derived-zone fix ───────────────────────────────────────────
-# Synthetic "linker" nav_nodes (node_type in 'amenity'/'elevator'/
-# 'escalator'/'checkpoint') were bulk-inserted with zone='public', but
-# many physically sit on the secure side of TSA. We can't edit the DB, so
-# we derive each amenity's true zone in SQL.
-#
-# Two-tier rule:
-#   1. Count its neighbors that are real waypoints (node_type='waypoint').
-#      Other linkers are untrustworthy — their stored zone is the very
-#      thing we're trying to correct — so we skip them.
-#   2. If there's a clear majority among real-waypoint neighbors, use it.
-#   3. Otherwise (tie, or the amenity is on a "linker island" whose only
-#      edges go to other linkers — Whataburger, 3Sixty Duty Free, the
-#      stranded Elevator_D34), fall back to the physically nearest real
-#      waypoint's zone. Final fallback is the stored zone.
-#
-# Regular waypoint-anchored amenities are unaffected: their waypoint
-# neighbors share the correct stored zone.
-#
-# Drop these fragments into any query whose FROM clause is
-# `amenities a LEFT JOIN nav_nodes n ON n.id = a.nodeid`.
+# Derives an amenity's real zone from its waypoint neighbors, since some
+# linker nodes have a stale stored zone. Drop these into any query whose
+# FROM is `amenities a LEFT JOIN nav_nodes n ON n.id = a.nodeid`.
 AMENITY_DERIVED_ZONE_JOIN = """
 LEFT JOIN LATERAL (
     SELECT SUM(CASE WHEN n2.zone = 'secure' THEN 1 ELSE 0 END) AS secure_n,
@@ -120,13 +98,11 @@ def get_direction_instruction(from_node, to_node, prev_direction, current_direct
     if prev_direction is None:
         return f"Head {current_direction}"
 
-    # Map directions to degrees
     dir_to_deg = {
         'N': 0, 'NE': 45, 'E': 90, 'SE': 135,
         'S': 180, 'SW': 225, 'W': 270, 'NW': 315
     }
 
-    # Calculate turn angle
     if prev_direction in dir_to_deg and current_direction in dir_to_deg:
         diff = (dir_to_deg[current_direction] - dir_to_deg[prev_direction] + 360) % 360
 
@@ -179,10 +155,7 @@ def health():
 
 
 def routeHelperFunctionInQueryDijkstraReplacement(fromNode: int, toNode: int) -> list[dict[str, Any]]:
-    #temporarily reuse djikstra query to get nodes ids to test the latter part of the function
-    #TODO actually replace this with a custom implementation of A* or something, but that's lower priority
-    #now that I've realised the rest of the function this was in was querying the database thousands
-    #of times per request
+    # TODO: replace pgr_dijkstra with A*.
     cur.execute("""
         SELECT
             r.node
@@ -194,10 +167,7 @@ def routeHelperFunctionInQueryDijkstraReplacement(fromNode: int, toNode: int) ->
         ORDER BY r.seq
     """, (fromNode, toNode))
     node_ids = [row['node'] for row in cur.fetchall()]
-    
-    
-    
-    #Once we have the list of nodes, this query returns all the columns that were previously returned by the pgr_djikstra query, since that's what the calling function expects.
+
     cur.execute("""
         WITH path_nodes AS (
             SELECT node_id, seq
@@ -244,16 +214,7 @@ def routeHelperFunctionInQueryDijkstraReplacement(fromNode: int, toNode: int) ->
     
 @app.route('/api/route', methods=['GET'])
 def get_route():
-    """
-    Get navigation route between two nodes.
-
-    Query params:
-        from_node: starting node ID
-        to_node: destination node ID
-
-    Returns:
-        JSON with ordered list of waypoints (lat, lng, direction, instruction)
-    """
+    """Get navigation route between two nodes."""
     from_node = request.args.get('from_node', type=int)
     to_node = request.args.get('to_node', type=int)
 
@@ -261,30 +222,26 @@ def get_route():
         return jsonify({'error': 'from_node and to_node are required'}), 400
 
     try:
-        rows = routeHelperFunctionInQueryDijkstraReplacement(from_node, to_node) 
-        #Extracting just that ^ part so I can figure out the rest of this function later
-        
+        rows = routeHelperFunctionInQueryDijkstraReplacement(from_node, to_node)
+
         if not rows:
             return jsonify({'error': 'No route found'}), 404
 
-        # Get edge directions for the path
         waypoints = []
         prev_direction = None
 
         for i, row in enumerate(rows):
-            # Look up the direction of the edge to the next node
             current_direction = None
-            if i < len(rows) - 1 and row['edge'] is not None:  # If there's a next node and an edge exists
+            if i < len(rows) - 1 and row['edge'] is not None:
                 current_direction = row['edgeToNextNode_direction']
                 if row['edgeToNextNode_fromNode'] != row['node']:
-                    # Edge is stored in reverse, flip direction
+                    # Edge stored in reverse, flip the direction.
                     opposite = {
                         'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E',
                         'NE': 'SW', 'SW': 'NE', 'NW': 'SE', 'SE': 'NW'
                     }
                     current_direction = opposite.get(current_direction, current_direction)
 
-            # Calculate bearing and distance to next node using lat/lng
             bearing_to_next = None
             cardinal_label = None
             distance_meters = 0.0
@@ -325,8 +282,8 @@ def get_route():
             if current_direction:
                 prev_direction = current_direction
 
-        total_distance = sum(d.get("cost", 0) for d in rows) #Faster and fewer FP errors than summing it in the for loop
-        
+        total_distance = sum(d.get("cost", 0) for d in rows)
+
         return jsonify({
             'from_node': from_node,
             'to_node': to_node,
@@ -336,26 +293,12 @@ def get_route():
         })
 
     except Exception as e:
-        #raise #TODO comment out, this is just here for testing to effectively disable the except block so it will actually propogate the error up the chain for debugging
         return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/nearest', methods=['GET'])
 def nearest_node():
-    """
-    Find the nearest node to a given lat/lng (for GPS positioning).
-
-    Query params:
-        lat: latitude
-        lng: longitude
-        zone: (optional) restrict candidates to nodes in this zone
-              (e.g. 'public' or 'secure'). Nodes with NULL zone are
-              treated as 'public'. When omitted, all nodes are eligible.
-
-    Returns:
-        The closest node with its ID, coordinates, label, node_type,
-        and zone.
-    """
+    """Find the nearest node to a lat/lng. Optional `zone` filter ('public' / 'secure')."""
     lat = request.args.get('lat', type=float)
     lng = request.args.get('lng', type=float)
     zone_param = request.args.get('zone')
@@ -365,7 +308,6 @@ def nearest_node():
 
     try:
         # Cache one KDTree per zone filter so repeated calls are fast.
-        # Key '__all__' means "no zone filter".
         if not hasattr(nearest_node, "finders"):
             nearest_node.finders = {}
             nearest_node.node_ids_by_key = {}
@@ -401,7 +343,7 @@ def nearest_node():
             FROM nav_nodes
             WHERE id = %s
             LIMIT 1
-        """, (nearest_node_id, )) #Comma to make it a tuple and not just a parenthesized expression
+        """, (nearest_node_id,))
         print("executed rds query")
 
         node = cur.fetchone()
@@ -421,21 +363,16 @@ def nearest_node():
         })
 
     except Exception as e:
-        #raise #This is just here for testing to effectively disable the except block so it will actually propogate the error up the chain for debugging
         return jsonify({'error': str(e)}), 500
-        
+
+
 @app.route('/api/nodes', methods=['GET'])
 def get_nodes():
-    """
-    Get all labeled nodes (gates, amenities, etc.) for the destination picker.
-
-    Query params (optional):
-        type: filter by node_type (e.g., 'gate', 'amenity', 'restroom')
-    """
+    """Get labeled nodes for the destination picker. Optional `type` and `zone` filters."""
     node_type = request.args.get('type')
     node_zone = request.args.get('zone')
 
-    conditions = [] #I would include label != '' as a default but currently none of them are labeled
+    conditions = []
     params = []
 
     if node_type:
@@ -453,21 +390,6 @@ def get_nodes():
             {where_clause}
             ORDER BY label
         """, params)
-                  
-        #if node_type:
-        #    cur.execute("""
-        #        SELECT id, latitude, longitude, label, node_type
-        #        FROM nav_nodes
-        #        WHERE node_type = %s AND label != '' AND zone = %s
-        #        ORDER BY label
-        #    """, (node_type,))
-        #else:
-        #    cur.execute("""
-        #        SELECT id, latitude, longitude, label, node_type
-        #        FROM nav_nodes
-        #        WHERE label != ''
-        #        ORDER BY node_type, label
-        #    """)
 
         nodes = cur.fetchall()
         
@@ -499,19 +421,10 @@ def get_edges():
 
 @app.route('/api/amenities', methods=['GET'])
 def get_amenities():
-    """Return all amenities for visualization.
-
-    Each amenity also includes `has_accessible_unit` so the client can filter
-    by accessibility without a second round trip. Build 1: the amenityUnits
-    table is empty, so this is computed directly from a.wheelchairaccessible.
-    """
+    """Return all amenities. Includes `has_accessible_unit` for client-side filtering."""
     try:
         c = databaseConnection.cursor()
-        # Return the LINKED nav_node's lat/lng (calibrated frame), not the
-        # raw CSV lat/lng on the amenities row. The client uses these coords
-        # for marker placement AND routing snaps to amenity.nodeid, so both
-        # must live in the same coordinate frame as nav_nodes. Fall back to
-        # the raw amenity coords if the linkage is somehow missing.
+        # Use the linked nav_node lat/lng so markers and routing share one frame.
         c.execute(f"""
             SELECT a.id,
                    a.nodeid,
@@ -540,24 +453,10 @@ def get_amenities():
 
 @app.route('/api/random-node', methods=['GET'])
 def get_random_node():
-    """Return a random nav node in the requested zone.
+    """Return a random walkable waypoint in the requested zone ('secure' or 'public').
 
-    Used by the Android app's "Start in Secure Area" / "Start in Public Area"
-    test buttons so each press drops the user at a different starting point.
-
-    Restricted to `node_type='waypoint'` (linkers are synthetic attachments,
-    not walkable positions). On top of that, a small number of waypoints
-    have a stored zone that disagrees with their physical surroundings —
-    e.g. nodes 6841 and 6940 are stamped 'public' but every neighboring
-    waypoint is secure. Picking one of those at random would drop the user
-    in the wrong concourse, and any subsequent route into the user's
-    intended zone would fail because no edge crosses the TSA boundary.
-    We exclude them with the same neighbor-consensus check we use for
-    amenities: a waypoint qualifies only if at least as many waypoint
-    neighbors agree with its stored zone as disagree.
-
-    Query params:
-        zone: 'secure' or 'public' (required)
+    Skips waypoints whose stored zone disagrees with their neighbors, so the
+    Android test buttons don't drop the user on the wrong side of TSA.
     """
     zone = request.args.get('zone', type=str)
     if zone not in ('secure', 'public'):
@@ -613,13 +512,7 @@ def get_amenity_types():
 
 @app.route('/api/route-to-amenity', methods=['GET'])
 def route_to_amenity():
-    """
-    Find the nearest amenity of a given type to the starting node and return the route.
-
-    Query params:
-        from_node: starting node ID
-        amenity_type: the amenity type to search for (e.g. 'gate', 'restroom', 'food')
-    """
+    """Find the nearest amenity of a given type to the starting node and return the route."""
     from_node = request.args.get('from_node', type=int)
     amenity_type = request.args.get('amenity_type', type=str)
     accessible_param = request.args.get('accessible', type=str)
@@ -629,7 +522,6 @@ def route_to_amenity():
         return jsonify({'error': 'from_node and amenity_type are required'}), 400
 
     try:
-        # Get the starting node's coordinates AND zone
         cur.execute("SELECT lat, lng, zone FROM nav_nodes WHERE id = %s", (from_node,))
         start = cur.fetchone()
         if not start:
@@ -637,14 +529,8 @@ def route_to_amenity():
 
         start_zone = start['zone'] or 'public'
 
-        # Get all amenities of the requested type whose linked nav_node is in the
-        # SAME zone as the starting node. Secure-side users can only reach secure
-        # amenities; public-side users can only reach public ones. Uses the
-        # derived zone (see AMENITY_DERIVED_ZONE_* at the top of this file)
-        # because some linker nodes have a stale stored zone.
+        # Only return amenities in the same zone as the user.
         if accessible:
-            # Build 1: amenityUnits table is empty, so filter directly by the
-            # amenity-level accessibility flag.
             cur.execute(f"""
                 SELECT a.id AS amenity_id, a.nodeID, a.name, a.type,
                        a.latitude, a.longitude,
@@ -682,16 +568,13 @@ def route_to_amenity():
                     'error': f'No {amenity_type} amenities reachable from your zone ({start_zone})'
                 }), 404
 
-        # Sort candidates by straight-line distance (nearest first).
-        # Use the LINKED nav_node's lat/lng, not the raw amenity row's
-        # lat/lng — routing operates in the nav_node frame, so the sort
-        # must too. Mixing frames here used to pick a "nearest" amenity
-        # whose nodeid then routed to a completely different spot.
+        # Sort by straight-line distance using the linked nav_node coords
+        # so we stay in the same frame as routing.
         candidates.sort(key=lambda c: haversine_distance_meters(
             start['lat'], start['lng'], c['node_lat'], c['node_lng']
         ))
 
-        # Try each candidate until we find one that is routable
+        # Try each candidate until one is routable.
         rows = None
         nearest = None
         target_node_id = None
@@ -704,7 +587,7 @@ def route_to_amenity():
                     nearest = candidate
                     break
             except Exception:
-                continue  # This candidate's node is unreachable, try next
+                continue
 
         if not rows or not nearest:
             return jsonify({'error': 'No routable amenity of that type found'}), 404
