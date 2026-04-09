@@ -9,12 +9,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
-// --- Tunable constants ---
+// Tunable constants
 const val SIMULATION_STEP_INTERVAL_MS = 2000L
 const val OFF_PATH_THRESHOLD_METERS = 15.0
-// Off-path nudge is small + random: a few meters, in any direction. Big
-// enough that the recalc snaps to a different nav node, small enough that
-// the user doesn't visibly teleport across the terminal.
+// Random 5–10m nudge to force a recalc without visibly teleporting.
 const val OFF_PATH_NUDGE_MIN_METERS = 5.0
 const val OFF_PATH_NUDGE_MAX_METERS = 10.0
 
@@ -41,9 +39,7 @@ data class NavigationState(
     // Off-path
     val isRecalculating: Boolean = false,
     val destinationNodeId: Int? = null,
-    // Zone of the user's current starting node ('public' or 'secure').
-    // Used to keep off-path teleports and recalculations within the
-    // same airside/landside partition as the user.
+    // User's current zone ('public' or 'secure').
     val currentZone: String? = null,
     // Amenities + filters
     val amenities: List<Amenity> = emptyList(),
@@ -54,9 +50,7 @@ data class NavigationState(
     // Single-type focus from the dropdown (separate from chip multi-select)
     val dropdownTypeFilter: String? = null,
     val restroomGenderFilter: RestroomGender = RestroomGender.ANY,
-    // Set when the user picks an amenity in a different zone than currentZone.
-    // The UI shows a confirm dialog warning that they'd have to clear/exit
-    // TSA, and the request is parked here until they confirm or cancel.
+    // Cross-zone amenity parked here until the user confirms or cancels.
     val pendingCrossZoneAmenity: Amenity? = null,
 )
 
@@ -66,11 +60,7 @@ fun filteredAmenities(state: NavigationState): List<Amenity> = state.amenities.f
     val accessOk = !state.accessibilityMode ||
         a.has_accessible_unit == true ||
         a.wheelchairaccessible.equals("yes", ignoreCase = true)
-    // Only show amenities that live in the same zone as the user's current
-    // starting point. Until the user picks a start location (Start in Public
-    // / Start in Secure), hide every amenity. Showing them all would let the
-    // user pick a destination before we know which side of TSA they're on,
-    // which is exactly how the "route starts in the wrong zone" bug happens.
+    // Hide amenities until the user picks a starting zone.
     val zoneOk = state.currentZone != null && a.zone == state.currentZone
     val genderOk = if (state.dropdownTypeFilter == "restroom" &&
         state.restroomGenderFilter != RestroomGender.ANY
@@ -95,8 +85,6 @@ class NavigationViewModel : ViewModel() {
     private val api = NavigationApi.service
     private var simulationJob: Job? = null
 
-    // ── Amenity types ──────────────────────────────────────────────
-
     fun loadAmenityTypes() {
         viewModelScope.launch {
             try {
@@ -118,8 +106,6 @@ class NavigationViewModel : ViewModel() {
             }
         }
     }
-
-    // ── Selection + filter toggles ─────────────────────────────────
 
     fun selectAmenity(amenity: Amenity) {
         _state.value = _state.value.copy(selectedAmenity = amenity)
@@ -146,7 +132,7 @@ class NavigationViewModel : ViewModel() {
 
     fun setDropdownTypeFilter(type: String?) {
         val current = _state.value
-        // Reset gender sub-filter when the type changes (or is cleared)
+        // Reset gender sub-filter when the type changes.
         val resetGender = current.dropdownTypeFilter != type
         _state.value = current.copy(
             dropdownTypeFilter = type,
@@ -158,10 +144,7 @@ class NavigationViewModel : ViewModel() {
         _state.value = _state.value.copy(restroomGenderFilter = gender)
     }
 
-    /**
-     * Route to the nearest amenity matching the current dropdown filter context
-     * (type + gender + accessibility). Picks closest by haversine to user location.
-     */
+    /** Route to the closest amenity matching current filters by haversine distance. */
     fun routeToNearestFilteredRestroom() {
         val state = _state.value
         val user = state.userLocation ?: return
@@ -176,12 +159,15 @@ class NavigationViewModel : ViewModel() {
         routeToSpecificAmenity(closest)
     }
 
+    /** Test-only synchronous seed: place the user at [location] in [zone]. */
+    internal fun seedStartForTest(location: LatLng, zone: String) {
+        _state.value = _state.value.copy(userLocation = location, currentZone = zone)
+    }
+
     fun routeToSpecificAmenity(amenity: Amenity) {
         val currentLocation = _state.value.userLocation ?: return
         val zone = _state.value.currentZone
-        // Cross-zone guard. The list filter usually prevents this from being
-        // reachable, but we double-check at route time so a stale selection
-        // or a future code path can't silently produce a route through TSA.
+        // Defense in depth: filter normally hides this, but double-check.
         if (zone != null && amenity.zone != null && amenity.zone != zone) {
             _state.value = _state.value.copy(pendingCrossZoneAmenity = amenity)
             return
@@ -197,11 +183,7 @@ class NavigationViewModel : ViewModel() {
                     currentLocation.latitude, currentLocation.longitude, _state.value.currentZone
                 )
                 _state.value = _state.value.copy(currentZone = nearest.zone)
-                // /api/amenities now returns the linked nav_node's lat/lng, so
-                // amenity.nodeid is authoritative and lives in the same frame as
-                // the marker we just drew.
                 val response = api.getRoute(nearest.node_id, amenity.nodeid)
-                // Preserve the chosen amenity's name as the destination label
                 applyRouteResponse(response.copy(destination_name = amenity.name))
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
@@ -212,22 +194,12 @@ class NavigationViewModel : ViewModel() {
         }
     }
 
-    /**
-     * User saw the cross-zone confirm dialog and chose to bail. Just clear
-     * the parked amenity; nothing else to undo.
-     */
+    /** User cancelled the cross-zone confirm dialog. */
     fun cancelCrossZoneRoute() {
         _state.value = _state.value.copy(pendingCrossZoneAmenity = null)
     }
 
-    /**
-     * User saw the cross-zone confirm dialog and chose to proceed anyway.
-     * The starting node stays anchored in the user's current zone (so the
-     * route literally starts where they are), and pgRouting will walk the
-     * cross-zone edges through the TSA checkpoint to reach the destination.
-     * We deliberately do NOT bump currentZone here — the user hasn't
-     * physically crossed TSA, they're just being shown the path.
-     */
+    /** User confirmed the cross-zone route; pgRouting walks through the TSA edges. */
     fun confirmCrossZoneRoute() {
         val amenity = _state.value.pendingCrossZoneAmenity ?: return
         val currentLocation = _state.value.userLocation
@@ -236,8 +208,6 @@ class NavigationViewModel : ViewModel() {
         executeRouteToAmenity(amenity, currentLocation)
     }
 
-    // ── Route to specific amenity type ─────────────────────────────
-
     fun routeToAmenity(amenityType: String) {
         val currentLocation = _state.value.userLocation ?: return
         viewModelScope.launch {
@@ -245,15 +215,11 @@ class NavigationViewModel : ViewModel() {
                 isLoading = true, error = null, selectedAmenityType = amenityType
             )
             try {
-                // First find the nearest node to simulated position. Constrain
-                // it to the user's current zone so the type-based "Route to
-                // nearest" can never snap onto a node on the other side of TSA.
+                // Constrain nearest-node lookup to the user's current zone.
                 val nearest = api.getNearestNode(
                     currentLocation.latitude, currentLocation.longitude, _state.value.currentZone
                 )
-                // Remember this node's zone so off-path recalcs stay airside/landside-correct
                 _state.value = _state.value.copy(currentZone = nearest.zone)
-                // Then route to nearest amenity of that type
                 val accessible = _state.value.accessibilityMode
                 val response = api.getRouteToAmenity(
                     nearest.node_id, amenityType, if (accessible) true else null
@@ -274,8 +240,6 @@ class NavigationViewModel : ViewModel() {
             }
         }
     }
-
-    // ── Fetch a direct node-to-node route ──────────────────────────
 
     fun fetchRoute(fromNode: Int, toNode: Int) {
         viewModelScope.launch {
@@ -313,8 +277,6 @@ class NavigationViewModel : ViewModel() {
         )
     }
 
-    // ── Simulation engine ──────────────────────────────────────────
-
     fun startSimulation() {
         if (_state.value.waypoints.isEmpty()) return
         stopSimulation()
@@ -342,7 +304,6 @@ class NavigationViewModel : ViewModel() {
                 )
 
                 if (i == waypoints.size - 1) {
-                    // Arrived
                     _state.value = _state.value.copy(
                         currentInstruction = "You have arrived at ${_state.value.destinationName}!",
                         isSimulating = false,
@@ -354,7 +315,6 @@ class NavigationViewModel : ViewModel() {
 
                 delay(SIMULATION_STEP_INTERVAL_MS)
 
-                // Check if simulation was stopped externally
                 if (!_state.value.isSimulating) return@launch
             }
         }
@@ -366,21 +326,13 @@ class NavigationViewModel : ViewModel() {
         _state.value = _state.value.copy(isSimulating = false)
     }
 
-    // ── Off-path detection & recalculation ─────────────────────────
-
     fun goOffPath() {
         val current = _state.value.userLocation ?: return
         val destinationId = _state.value.destinationNodeId ?: return
-        // Zone of the user's current starting point. Off-path teleports
-        // MUST stay within this zone — a secure-side passenger cannot
-        // legally cross TSA to a public-side node and vice versa.
+        // Off-path teleports must stay in the user's current zone.
         val zone = _state.value.currentZone
 
-        // Small nudge in a random direction. Previously this was a fixed
-        // 25m NE jump which was both too large and too predictable —
-        // pressing the button always sent the user the same way. Now each
-        // press picks a fresh bearing and a 5–10m distance, so the recalc
-        // is short and goes somewhere different every time.
+        // Random bearing, 5–10m nudge to force a recalc.
         val angle = Math.random() * 2 * Math.PI
         val meters = OFF_PATH_NUDGE_MIN_METERS +
             Math.random() * (OFF_PATH_NUDGE_MAX_METERS - OFF_PATH_NUDGE_MIN_METERS)
@@ -402,14 +354,12 @@ class NavigationViewModel : ViewModel() {
     private fun recalculateRoute(from: LatLng, destinationNodeId: Int, zone: String?) {
         viewModelScope.launch {
             try {
-                // Constrain the snap-to-nearest to the user's current zone so
-                // we never teleport across the secure/public boundary.
+                // Stay in the user's zone when snapping to nearest.
                 val nearest = api.getNearestNode(from.latitude, from.longitude, zone)
                 _state.value = _state.value.copy(currentZone = nearest.zone)
                 val response = api.getRoute(nearest.node_id, destinationNodeId)
                 applyRouteResponse(response)
                 _state.value = _state.value.copy(isRecalculating = false)
-                // Auto-resume simulation on the new route
                 startSimulation()
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
@@ -420,10 +370,7 @@ class NavigationViewModel : ViewModel() {
         }
     }
 
-    /**
-     * Check if the given position is off the current route polyline.
-     * Returns true if minimum distance to any segment exceeds the threshold.
-     */
+    /** True if [position] is more than the threshold away from the route. */
     fun isOffPath(position: LatLng): Boolean {
         val points = _state.value.routePoints
         if (points.size < 2) return false
@@ -436,20 +383,9 @@ class NavigationViewModel : ViewModel() {
         return minDist > OFF_PATH_THRESHOLD_METERS
     }
 
-    // ── Location update (used by real GPS if ever connected) ───────
-
     fun updateUserLocation(location: LatLng) {
         val s = _state.value
-        // Don't let real GPS overwrite the user position when we're in
-        // any kind of mock/test mode:
-        //   - isSimulating: a simulated walk is in progress; a real fix
-        //     would snap the camera away every second.
-        //   - currentZone != null: the user pressed "Start in Secure" or
-        //     "Start in Public", so we're running a spoofed-location test.
-        //     The FusedLocationProviderClient fires roughly every second,
-        //     so without this check the mock position lasts only until the
-        //     next GPS fix — which is why the blue dot "flashed" and then
-        //     every route started from the dev's real physical location.
+        // Don't let real GPS overwrite a simulated or mock-start position.
         if (s.isSimulating || s.currentZone != null) return
         _state.value = s.copy(userLocation = location)
 
@@ -507,23 +443,14 @@ class NavigationViewModel : ViewModel() {
             accessibilityMode = prev.accessibilityMode,
             activeTypeFilters = prev.activeTypeFilters,
             userLocation = prev.userLocation,
-            // Keep the test-start zone so the amenity filter doesn't reset
-            // to "show everything" the moment the user stops a route.
+            // Keep the zone so the amenity filter stays in place.
             currentZone = prev.currentZone
         )
     }
 
     /**
-     * Drop the user at a random nav node in the requested zone
-     * (`"secure"` or `"public"`). Used by the on-screen test buttons so we
-     * can validate routing/filtering from either side of TSA without needing
-     * a real GPS fix.
-     *
-     * Also acts as a full reset: stops any active simulation, clears the
-     * route polyline, destination, and selection, then seeds `currentZone`
-     * so the amenity list filters correctly from the moment the user is
-     * placed. This is what lets the user finish one route and start a new
-     * test without restarting the app — just press the button again.
+     * Reset state and drop the user at a random nav node in the requested
+     * zone ('secure' or 'public'). Used by the on-screen test buttons.
      */
     fun setMockStart(zone: String) {
         stopSimulation()
@@ -532,14 +459,12 @@ class NavigationViewModel : ViewModel() {
                 val node = api.getRandomNode(zone)
                 val prev = _state.value
                 _state.value = NavigationState(
-                    // Preserve data that shouldn't be wiped on reset
                     amenityTypes = prev.amenityTypes,
                     amenities = prev.amenities,
                     accessibilityMode = prev.accessibilityMode,
                     activeTypeFilters = prev.activeTypeFilters,
                     dropdownTypeFilter = prev.dropdownTypeFilter,
                     restroomGenderFilter = prev.restroomGenderFilter,
-                    // New mock start
                     userLocation = LatLng(node.latitude, node.longitude),
                     currentZone = node.zone,
                     currentInstruction = "Ready — pick a destination",
@@ -552,8 +477,6 @@ class NavigationViewModel : ViewModel() {
         }
     }
 
-    // ── Geometry helpers ───────────────────────────────────────────
-
     private fun distanceBetween(a: LatLng, b: LatLng): Double {
         val dlat = a.latitude - b.latitude
         val dlng = a.longitude - b.longitude
@@ -561,7 +484,7 @@ class NavigationViewModel : ViewModel() {
     }
 
     internal fun pointToSegmentDistanceMeters(p: LatLng, a: LatLng, b: LatLng): Double {
-        // Project point p onto segment a-b, compute haversine distance to closest point
+        // Project p onto segment a-b, then haversine to the closest point.
         val dx = b.longitude - a.longitude
         val dy = b.latitude - a.latitude
         if (dx == 0.0 && dy == 0.0) return haversineMeters(p, a)
