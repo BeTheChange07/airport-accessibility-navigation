@@ -231,17 +231,6 @@ def get_route():
         prev_direction = None
 
         for i, row in enumerate(rows):
-            current_direction = None
-            if i < len(rows) - 1 and row['edge'] is not None:
-                current_direction = row['edgeToNextNode_direction']
-                if row['edgeToNextNode_fromNode'] != row['node']:
-                    # Edge stored in reverse, flip the direction.
-                    opposite = {
-                        'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E',
-                        'NE': 'SW', 'SW': 'NE', 'NW': 'SE', 'SE': 'NW'
-                    }
-                    current_direction = opposite.get(current_direction, current_direction)
-
             bearing_to_next = None
             cardinal_label = None
             distance_meters = 0.0
@@ -256,6 +245,13 @@ def get_route():
                     row['latitude'], row['longitude'],
                     next_row['latitude'], next_row['longitude']
                 )
+
+            # Derive the leg's cardinal direction from the real lat/lng bearing
+            # rather than the stored nav_edges.direction column, which was
+            # populated by a buggy nav editor getDir() (canvas y-down vs
+            # geographic y-up) and has N/S, NE/SE, NW/SW flipped. Using the
+            # bearing keeps `instruction` consistent with `cardinal_direction`.
+            current_direction = cardinal_label
 
             instruction = get_direction_instruction(
                 row['node'],
@@ -596,16 +592,6 @@ def route_to_amenity():
         prev_direction = None
 
         for i, row in enumerate(rows):
-            current_direction = None
-            if i < len(rows) - 1 and row['edge'] is not None:
-                current_direction = row['edgeToNextNode_direction']
-                if row['edgeToNextNode_fromNode'] != row['node']:
-                    opposite = {
-                        'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E',
-                        'NE': 'SW', 'SW': 'NE', 'NW': 'SE', 'SE': 'NW'
-                    }
-                    current_direction = opposite.get(current_direction, current_direction)
-
             bearing_to_next = None
             cardinal_label = None
             distance_meters = 0.0
@@ -620,6 +606,13 @@ def route_to_amenity():
                     row['latitude'], row['longitude'],
                     next_row['latitude'], next_row['longitude']
                 )
+
+            # Derive the leg's cardinal direction from the real lat/lng bearing
+            # rather than the stored nav_edges.direction column, which was
+            # populated by a buggy nav editor getDir() (canvas y-down vs
+            # geographic y-up) and has N/S, NE/SE, NW/SW flipped. Using the
+            # bearing keeps `instruction` consistent with `cardinal_direction`.
+            current_direction = cardinal_label
 
             instruction = get_direction_instruction(
                 row['node'],
