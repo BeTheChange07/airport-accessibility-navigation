@@ -57,7 +57,7 @@ def update_random_amenities(conn, count):
         if not amenities:
             return
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now()
 
         for amenity in amenities:
             amenity_id = amenity['id']

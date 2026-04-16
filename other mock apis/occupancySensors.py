@@ -41,7 +41,7 @@ def update_random_units(count):
         if not units:
             return
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now()
 
         for unit in units:
             unit_id = unit['unitid']
