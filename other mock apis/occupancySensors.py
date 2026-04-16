@@ -41,29 +41,57 @@ def update_random_units(count):
         if not units:
             return
 
-        now = datetime.now()
+        affected_amenities = set()
 
         for unit in units:
             unit_id = unit['unitid']
             amenity_id = unit['amenityid']
             occupied = random.choice([True, False])
 
-            # Update unit
+            # Update unit using composite key + DB timestamp
             cur.execute("""
                 UPDATE amenityunits
                 SET occupied = %s,
-                    lastupdated = %s
+                    lastupdated = NOW()
                 WHERE unitid = %s
-            """, (occupied, now, unit_id))
+                  AND amenityid = %s
+            """, (occupied, unit_id, amenity_id))
 
-            # Update parent amenity
-            cur.execute("""
-                UPDATE amenities
-                SET lastupdated = %s
-                WHERE id = %s
-            """, (now, amenity_id))
+            affected_amenities.add(amenity_id)
 
-            print(f"Updated unit {unit_id} -> occupied={occupied}")
+            print(f"Updated unit ({amenity_id}, {unit_id}) -> occupied={occupied}")
+
+        if not affected_amenities:
+            return
+
+        amenity_ids = list(affected_amenities)
+
+        # Bulk update all affected amenities
+        cur.execute("""
+            UPDATE amenities
+            SET 
+                occupancy = CASE
+                    WHEN stats.total = 0 THEN amenities.occupancy
+                    WHEN stats.occupied_count = stats.total THEN 'full'
+                    WHEN stats.occupied_count::float / stats.total >= 0.66 THEN 'high'
+                    WHEN stats.occupied_count::float / stats.total >= 0.33 THEN 'medium'
+                    WHEN stats.occupied_count = 0 THEN 'empty'
+                    ELSE 'low'
+                END,
+                lastupdated = NOW()
+            FROM (
+                SELECT 
+                    amenityid,
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE occupied = true) AS occupied_count
+                FROM amenityunits
+                WHERE amenityid = ANY(%s)
+                GROUP BY amenityid
+            ) AS stats
+            WHERE amenities.id = stats.amenityid
+        """, (amenity_ids,))
+
+        print(f"Updated {len(amenity_ids)} amenities (occupancy + timestamp)")
 
 
 def run_loop(interval, count):

@@ -57,8 +57,6 @@ def update_random_amenities(conn, count):
         if not amenities:
             return
 
-        now = datetime.now()
-
         for amenity in amenities:
             amenity_id = amenity['id']
             status = random.choice(STATUS_OPTIONS)
@@ -66,9 +64,9 @@ def update_random_amenities(conn, count):
             cur.execute("""
                 UPDATE amenities
                 SET status = %s,
-                    lastupdated = %s
+                    lastupdated = NOW()
                 WHERE id = %s
-            """, (status, now, amenity_id))
+            """, (status, amenity_id))
 
             print(f"[STATUS] Amenity {amenity_id} -> {status}")
 

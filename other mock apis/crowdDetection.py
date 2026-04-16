@@ -41,8 +41,6 @@ def update_random_amenities(count):
         if not amenities:
             return
 
-        now = datetime.now()
-
         for amenity in amenities:
             amenity_id = amenity['id']
 
@@ -52,9 +50,9 @@ def update_random_amenities(count):
             cur.execute("""
                 UPDATE amenities
                 SET crowdlevel = %s,
-                    lastupdated = %s
+                    lastupdated = NOW()
                 WHERE id = %s
-            """, (crowd_level, now, amenity_id))
+            """, (crowd_level, amenity_id))
 
             print(f"Updated amenity {amenity_id} -> crowdlevel={crowd_level}")
 
