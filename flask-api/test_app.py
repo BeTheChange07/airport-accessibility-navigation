@@ -177,6 +177,8 @@ class TestViewAmenities:
                 "latitude": 32.9005, "longitude": -97.0005,
                 "status": "open", "wheelchairaccessible": "yes",
                 "has_accessible_unit": True, "zone": "secure",
+                "occupancy": None, "crowdlevel": 0,
+                "lastupdated": "2026-04-18T10:00:00+00:00",
             }
         ])
         res = client.get("/api/amenities")
@@ -188,6 +190,25 @@ class TestViewAmenities:
         assert a["longitude"] == -97.0005
         assert a["has_accessible_unit"] is True
         assert a["zone"] == "secure"
+
+    def test_response_surfaces_iteration2_fields(self, client, cur):
+        """/api/amenities exposes occupancy, crowdlevel, lastupdated (UC5 + UC6)."""
+        cur.queue_fetchall([
+            {
+                "id": 9, "nodeid": 77, "name": "D5 Restroom", "type": "restroom",
+                "latitude": 32.9, "longitude": -97.0,
+                "status": "open", "wheelchairaccessible": "yes",
+                "has_accessible_unit": True, "zone": "secure",
+                "occupancy": "medium", "crowdlevel": 42,
+                "lastupdated": "2026-04-18T10:30:00+00:00",
+            }
+        ])
+        res = client.get("/api/amenities")
+        assert res.status_code == 200
+        a = res.get_json()["amenities"][0]
+        assert a["occupancy"] == "medium"
+        assert a["crowdlevel"] == 42
+        assert a["lastupdated"] == "2026-04-18T10:30:00+00:00"
 
 
 class TestVerifySecurityZoneAccess:
@@ -241,6 +262,9 @@ class TestGenerateRouteToAmenity:
             "node_lat": 32.9005,
             "node_lng": -97.0005,
             "node_zone": "secure",
+            "status": "open",
+            "occupancy": None,
+            "crowdlevel": 0,
         }
         base.update(overrides)
         return base
@@ -287,6 +311,125 @@ class TestGenerateRouteToAmenity:
     def test_missing_params_returns_400(self, client):
         """/api/route-to-amenity returns 400 when from_node/amenity_type are missing."""
         res = client.get("/api/route-to-amenity")
+        assert res.status_code == 400
+
+    def test_response_surfaces_destination_state(self, client, cur):
+        """Route response echoes destination status / occupancy so the client can warn.
+
+        Iteration 2: the Android VM stores destination_amenity_id +
+        destination_status + destination_occupancy from this payload so the
+        polling loop can detect mid-route changes.
+        """
+        cur.queue_fetchone({"lat": 32.9, "lng": -97.0, "zone": "secure"})
+        cur.queue_fetchall([self._candidate(
+            amenity_id=77, type="restroom", name="D5 Restroom",
+            status="open", occupancy="high", crowdlevel=55
+        )])
+        cur.queue_fetchall([{"node": 1}, {"node": 42}])
+        cur.queue_fetchall(self._dijkstra_rows())
+
+        res = client.get("/api/route-to-amenity?from_node=1&amenity_type=restroom")
+        assert res.status_code == 200
+        body = res.get_json()
+        assert body["destination_amenity_id"] == 77
+        assert body["destination_status"] == "open"
+        assert body["destination_occupancy"] == "high"
+        assert body["destination_crowdlevel"] == 55
+
+    def test_candidate_sql_filters_closed_and_full(self, client, cur):
+        """Route-to-amenity SQL includes the UC7 status filter and UC5 occupancy filter."""
+        cur.queue_fetchone({"lat": 32.9, "lng": -97.0, "zone": "public"})
+        cur.queue_fetchall([])  # no candidates -> 404
+        client.get("/api/route-to-amenity?from_node=1&amenity_type=restroom")
+
+        candidate_sql = next(
+            (sql for sql, _ in cur.executed if sql and "amenity_id" in sql),
+            None,
+        )
+        assert candidate_sql is not None, "Expected candidate SELECT to have run"
+        assert "a.status IN ('open', 'busy')" in candidate_sql
+        assert "a.occupancy IS NULL OR a.occupancy <> 'full'" in candidate_sql
+
+
+class TestAdminEndpoints:
+    # Use case: UC7 (Update Amenity Status) + UC5 admin occupancy demo lever.
+    # Iteration 2 admin portal is unauthenticated by design (UC4 login is Iteration 3).
+
+    def test_set_status_happy_path(self, client, cur):
+        """POST updates the status and returns the updated row."""
+        cur.queue_fetchone({
+            "id": 5, "name": "D5 Restroom", "type": "restroom",
+            "status": "closed", "occupancy": "low", "crowdlevel": 10,
+            "lastupdated": "2026-04-18T11:00:00+00:00",
+        })
+        res = client.post(
+            "/api/admin/amenity/5/status",
+            json={"status": "closed"},
+        )
+        assert res.status_code == 200
+        body = res.get_json()
+        assert body["status"] == "closed"
+        # Confirm the UPDATE actually ran.
+        update_sql = next(
+            (sql for sql, _ in cur.executed if sql and "UPDATE amenities" in sql),
+            None,
+        )
+        assert update_sql is not None
+        assert "status = %s" in update_sql
+
+    def test_set_status_rejects_unknown_value(self, client):
+        """Status outside the allowed set yields 400."""
+        res = client.post(
+            "/api/admin/amenity/5/status",
+            json={"status": "on_fire"},
+        )
+        assert res.status_code == 400
+
+    def test_set_occupancy_full_happy_path(self, client, cur):
+        """Admin 'Mark full' locks all stalls and sets the amenity bucket."""
+        # First fetchone: restroom type check.
+        cur.queue_fetchone({"id": 5, "type": "restroom"})
+        # Second fetchone: RETURNING row after the bucket UPDATE.
+        cur.queue_fetchone({
+            "id": 5, "name": "D5 Restroom", "type": "restroom",
+            "status": "open", "occupancy": "full", "crowdlevel": 10,
+            "lastupdated": "2026-04-18T11:05:00+00:00",
+        })
+        res = client.post(
+            "/api/admin/amenity/5/occupancy",
+            json={"state": "full"},
+        )
+        assert res.status_code == 200
+        body = res.get_json()
+        assert body["occupancy"] == "full"
+        # Confirm both the unit-level UPDATE and the aggregate UPDATE ran.
+        units_update = next(
+            (sql for sql, _ in cur.executed if sql and "UPDATE amenityunits" in sql),
+            None,
+        )
+        amenity_update = next(
+            (sql for sql, _ in cur.executed
+             if sql and "UPDATE amenities" in sql and "occupancy" in sql),
+            None,
+        )
+        assert units_update is not None
+        assert amenity_update is not None
+
+    def test_set_occupancy_rejects_non_restroom(self, client, cur):
+        """Occupancy control is restroom-only (UC5 scope)."""
+        cur.queue_fetchone({"id": 7, "type": "gate"})
+        res = client.post(
+            "/api/admin/amenity/7/occupancy",
+            json={"state": "full"},
+        )
+        assert res.status_code == 400
+
+    def test_set_occupancy_rejects_bad_state(self, client):
+        """state must be 'full' or 'empty'."""
+        res = client.post(
+            "/api/admin/amenity/5/occupancy",
+            json={"state": "half"},
+        )
         assert res.status_code == 400
 
 

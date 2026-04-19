@@ -1,3 +1,16 @@
+"""Mock queue-camera driver (UC6).
+
+Simulates the Airport Crowd Detection System by updating
+`amenities.crowdlevel` on each tick. Restrooms only.
+
+Previous version wrote `randint(0, 100)` every tick, which made the wait
+indicator teleport between ticks. This version does a bounded random walk:
+
+    new = clamp(current + step, 0, 100)
+
+so the needle drifts instead of jumping.
+"""
+
 import os
 import time
 import random
@@ -5,7 +18,6 @@ import argparse
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
-from datetime import datetime, timezone
 import atexit
 
 load_dotenv()
@@ -21,58 +33,60 @@ DB_CONFIG = {
 conn = psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor)
 conn.autocommit = True
 
+
 def exit_handler():
-    conn.close()
+    try:
+        conn.close()
+    except Exception:
+        pass
+
 
 atexit.register(exit_handler)
 
 
-def update_random_amenities(count):
+def tick(count, step_max):
+    """Walk `count` restrooms' crowdlevel by +/- up to step_max."""
     with conn.cursor() as cur:
-        # Fetch random amenities
         cur.execute("""
-            SELECT id
+            SELECT id, COALESCE(crowdlevel, 0) AS crowdlevel
             FROM amenities
+            WHERE type = 'restroom'
             ORDER BY RANDOM()
             LIMIT %s
         """, (count,))
-        amenities = cur.fetchall()
-
-        if not amenities:
+        rows = cur.fetchall()
+        if not rows:
             return
 
-        for amenity in amenities:
-            amenity_id = amenity['id']
-
-            # Generate random crowd level (adjust range as needed)
-            crowd_level = random.randint(0, 100)
-
+        for row in rows:
+            current = int(row['crowdlevel'] or 0)
+            step = random.randint(-step_max, step_max)
+            new_level = max(0, min(100, current + step))
             cur.execute("""
                 UPDATE amenities
-                SET crowdlevel = %s,
-                    lastupdated = NOW()
+                SET crowdlevel = %s, lastupdated = NOW()
                 WHERE id = %s
-            """, (crowd_level, amenity_id))
+            """, (new_level, row['id']))
+            print(f"[UC6] amenity {row['id']} crowdlevel {current} -> {new_level}")
 
-            print(f"Updated amenity {amenity_id} -> crowdlevel={crowd_level}")
 
-
-def run_loop(interval, count):
+def run_loop(interval, count, step_max):
     try:
         while True:
-            update_random_amenities(count)
+            tick(count, step_max)
             time.sleep(interval)
     except KeyboardInterrupt:
-        print("Stopping updater...")
+        print("Stopping crowd detection...")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Random amenity crowd level updater")
+    parser = argparse.ArgumentParser(description="UC6 crowd detection mock (restrooms only)")
     parser.add_argument("--interval", type=float, default=5,
-                        help="Seconds between update cycles (default: 5)")
-    parser.add_argument("--count", type=int, default=1,
-                        help="Number of amenities to update per cycle (default: 1)")
-
+                        help="Seconds between ticks (default: 5)")
+    parser.add_argument("--count", type=int, default=5,
+                        help="Restrooms updated per tick (default: 5)")
+    parser.add_argument("--step", type=int, default=8,
+                        help="Max +/- change per tick (default: 8)")
     args = parser.parse_args()
 
-    run_loop(interval=args.interval, count=args.count)
+    run_loop(args.interval, args.count, args.step)

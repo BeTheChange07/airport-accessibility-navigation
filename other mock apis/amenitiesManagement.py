@@ -1,3 +1,9 @@
+# NOTE: This script is NOT part of the UC7 flow in Iteration 2.
+# UC7 specifies `amenities.status` is set by an authorized employee via the
+# admin portal (see /admin/amenities). Running this script in parallel
+# will randomly overwrite those admin decisions. Leave it on the shelf
+# unless you are explicitly stress-testing behavior under concurrent writes.
+
 import os
 import time
 import random

@@ -18,7 +18,11 @@ data class RouteResponse(
     val waypoints: List<Waypoint>,
     // Only set on route-to-amenity responses.
     val amenity_type: String? = null,
-    val destination_name: String? = null
+    val destination_name: String? = null,
+    val destination_amenity_id: Int? = null,
+    val destination_status: String? = null,
+    val destination_occupancy: String? = null,
+    val destination_crowdlevel: Int? = null
 )
 
 data class Waypoint(
@@ -71,7 +75,14 @@ data class Amenity(
     val status: String,
     val wheelchairaccessible: String?,
     val has_accessible_unit: Boolean?,
-    val zone: String? = null
+    val zone: String? = null,
+    // Iteration 2 additions (UC5 / UC6 / UC7):
+    // occupancy is restrooms-only: 'empty'|'low'|'medium'|'high'|'full' (null for non-restrooms).
+    // crowdlevel is 0..100 (sensor-driven for restrooms, 0 for others).
+    // lastupdated is an ISO8601 timestamp when any of the above changed.
+    val occupancy: String? = null,
+    val crowdlevel: Int? = null,
+    val lastupdated: String? = null
 )
 
 data class RandomNodeResponse(

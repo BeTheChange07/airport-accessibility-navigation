@@ -1,5 +1,6 @@
 package com.example.se6387map
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.android.gms.maps.model.LatLng
@@ -16,7 +17,22 @@ const val OFF_PATH_THRESHOLD_METERS = 15.0
 const val OFF_PATH_NUDGE_MIN_METERS = 5.0
 const val OFF_PATH_NUDGE_MAX_METERS = 10.0
 
+// Amenity polling cadence. Faster while the user is navigating so the
+// "destination just filled up / closed" prompt is demo-responsive.
+const val AMENITY_POLL_INTERVAL_IDLE_MS = 15_000L
+const val AMENITY_POLL_INTERVAL_NAV_MS = 5_000L
+
+// Statuses an admin can set that mean "don't route here."
+internal val AMENITY_UNROUTABLE_STATUSES = setOf("closed", "maintenance", "out_of_service")
+
 enum class RestroomGender { ANY, MALE, FEMALE }
+
+/** Why the ViewModel wants the user to reroute mid-navigation. */
+data class ReroutePrompt(
+    val reason: String,             // "full" or "closed"
+    val amenityType: String,
+    val originalDestinationName: String,
+)
 
 data class NavigationState(
     val isLoading: Boolean = false,
@@ -52,6 +68,15 @@ data class NavigationState(
     val restroomGenderFilter: RestroomGender = RestroomGender.ANY,
     // Cross-zone amenity parked here until the user confirms or cancels.
     val pendingCrossZoneAmenity: Amenity? = null,
+    // Iteration 2:
+    // Track the amenity-level id of the current destination so polling can
+    // spot mid-route status / occupancy changes.
+    val destinationAmenityId: Int? = null,
+    val lastKnownDestinationStatus: String? = null,
+    val lastKnownDestinationOccupancy: String? = null,
+    // Parked here until the user confirms or declines the corresponding prompt.
+    val pendingOccupancyWarning: Amenity? = null,   // route-start warning (UC5 specific-pin)
+    val pendingReroutePrompt: ReroutePrompt? = null, // mid-route full / closed (UC5 + UC7)
 )
 
 fun filteredAmenities(state: NavigationState): List<Amenity> = state.amenities.filter { a ->
@@ -84,6 +109,7 @@ class NavigationViewModel : ViewModel() {
 
     private val api = NavigationApi.service
     private var simulationJob: Job? = null
+    private var pollingJob: Job? = null
 
     fun loadAmenityTypes() {
         viewModelScope.launch {
@@ -96,15 +122,80 @@ class NavigationViewModel : ViewModel() {
         }
     }
 
+    /**
+     * Fetch amenities and start the background polling loop if it isn't
+     * already running. Called from MainActivity on app start; safe to call
+     * repeatedly. Starts polling lazily (rather than in `init`) so unit
+     * tests that construct the ViewModel directly don't need a Main
+     * dispatcher to be available.
+     */
     fun loadAmenities() {
-        viewModelScope.launch {
-            try {
-                val response = api.getAmenities()
-                _state.value = _state.value.copy(amenities = response.amenities)
-            } catch (e: Exception) {
-                _state.value = _state.value.copy(error = "Failed to load amenities: ${e.message}")
+        startAmenityPollingIfNeeded()
+    }
+
+    private fun startAmenityPollingIfNeeded() {
+        if (pollingJob?.isActive == true) return
+        pollingJob = viewModelScope.launch {
+            while (true) {
+                try {
+                    val response = api.getAmenities()
+                    val sample = response.amenities.firstOrNull { it.type == "restroom" }
+                    Log.d(
+                        "AmenityPoll",
+                        "got ${response.amenities.size} amenities " +
+                            "(sample restroom: ${sample?.name} status=${sample?.status} " +
+                            "occ=${sample?.occupancy} crowd=${sample?.crowdlevel})"
+                    )
+                    onAmenitiesRefreshed(response.amenities)
+                } catch (e: Exception) {
+                    Log.w("AmenityPoll", "fetch failed: ${e.message}")
+                }
+                val interval = if (_state.value.isNavigating)
+                    AMENITY_POLL_INTERVAL_NAV_MS else AMENITY_POLL_INTERVAL_IDLE_MS
+                delay(interval)
             }
         }
+    }
+
+    /**
+     * Handle a fresh amenities payload. In addition to updating the map,
+     * watch for status / occupancy transitions on the active destination
+     * so we can prompt the user to reroute.
+     */
+    private fun onAmenitiesRefreshed(fresh: List<Amenity>) {
+        val prev = _state.value
+        val destId = prev.destinationAmenityId
+        val destAmenity = if (destId != null) fresh.firstOrNull { it.id == destId } else null
+
+        var newPrompt: ReroutePrompt? = prev.pendingReroutePrompt
+        // Only fire a new prompt while actively navigating and if we're not
+        // already prompting. Once the user accepts or declines, we reset.
+        if (destAmenity != null && prev.isNavigating && newPrompt == null) {
+            val nowFull = destAmenity.occupancy == "full"
+            val wasFull = prev.lastKnownDestinationOccupancy == "full"
+            val nowClosed = destAmenity.status in AMENITY_UNROUTABLE_STATUSES
+            val wasClosed = prev.lastKnownDestinationStatus in AMENITY_UNROUTABLE_STATUSES
+            newPrompt = when {
+                nowFull && !wasFull -> ReroutePrompt(
+                    reason = "full",
+                    amenityType = destAmenity.type,
+                    originalDestinationName = destAmenity.name
+                )
+                nowClosed && !wasClosed -> ReroutePrompt(
+                    reason = "closed",
+                    amenityType = destAmenity.type,
+                    originalDestinationName = destAmenity.name
+                )
+                else -> null
+            }
+        }
+
+        _state.value = prev.copy(
+            amenities = fresh,
+            lastKnownDestinationStatus = destAmenity?.status ?: prev.lastKnownDestinationStatus,
+            lastKnownDestinationOccupancy = destAmenity?.occupancy ?: prev.lastKnownDestinationOccupancy,
+            pendingReroutePrompt = newPrompt
+        )
     }
 
     fun selectAmenity(amenity: Amenity) {
@@ -172,12 +263,59 @@ class NavigationViewModel : ViewModel() {
             _state.value = _state.value.copy(pendingCrossZoneAmenity = amenity)
             return
         }
+        // UC5: warn before routing to a high-occupancy or full restroom.
+        // The backend's /api/route doesn't filter by occupancy (it obeys
+        // the user's explicit choice), so the confirmation lives here.
+        if (amenity.occupancy == "high" || amenity.occupancy == "full") {
+            _state.value = _state.value.copy(pendingOccupancyWarning = amenity)
+            return
+        }
         executeRouteToAmenity(amenity, currentLocation)
+    }
+
+    /** User acknowledged the high/full warning and wants to route anyway. */
+    fun confirmOccupancyWarning() {
+        val amenity = _state.value.pendingOccupancyWarning ?: return
+        val loc = _state.value.userLocation
+        _state.value = _state.value.copy(pendingOccupancyWarning = null)
+        if (loc != null) executeRouteToAmenity(amenity, loc)
+    }
+
+    fun dismissOccupancyWarning() {
+        _state.value = _state.value.copy(pendingOccupancyWarning = null)
+    }
+
+    /** User accepted the mid-route "destination filled up / closed" prompt. */
+    fun acceptReroutePrompt() {
+        val prompt = _state.value.pendingReroutePrompt ?: return
+        // Clear both the prompt and the previous destination tracking so the
+        // new call seeds cleanly.
+        _state.value = _state.value.copy(
+            pendingReroutePrompt = null,
+            destinationAmenityId = null,
+            lastKnownDestinationStatus = null,
+            lastKnownDestinationOccupancy = null,
+        )
+        // Backend's /api/route-to-amenity filter now skips full/closed, so
+        // this returns the next-nearest usable one automatically.
+        routeToAmenity(prompt.amenityType)
+    }
+
+    fun declineReroutePrompt() {
+        _state.value = _state.value.copy(pendingReroutePrompt = null)
     }
 
     private fun executeRouteToAmenity(amenity: Amenity, currentLocation: LatLng) {
         viewModelScope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = null)
+            _state.value = _state.value.copy(
+                isLoading = true,
+                error = null,
+                // Seed destination tracking so onAmenitiesRefreshed can catch
+                // status/occupancy changes after navigation starts.
+                destinationAmenityId = amenity.id,
+                lastKnownDestinationStatus = amenity.status,
+                lastKnownDestinationOccupancy = amenity.occupancy,
+            )
             try {
                 val nearest = api.getNearestNode(
                     currentLocation.latitude, currentLocation.longitude, _state.value.currentZone
@@ -257,6 +395,13 @@ class NavigationViewModel : ViewModel() {
     }
 
     private fun applyRouteResponse(response: RouteResponse) {
+        // If the user was simulating the previous route, stop that coroutine
+        // BEFORE we swap in the new waypoints. startSimulation captures the
+        // waypoint list at launch time, so without this the old sim would
+        // keep walking the dead path even though the polyline has flipped.
+        val wasSimulating = _state.value.isSimulating
+        if (wasSimulating) stopSimulation()
+
         val points = response.waypoints.map { LatLng(it.latitude, it.longitude) }
         val firstWp = response.waypoints.firstOrNull()
         _state.value = _state.value.copy(
@@ -273,8 +418,21 @@ class NavigationViewModel : ViewModel() {
             currentBearing = firstWp?.bearing_to_next?.toFloat() ?: 0f,
             cardinalDirection = firstWp?.cardinal_direction ?: "",
             distanceToNextMeters = firstWp?.distance_meters ?: 0.0,
-            userLocation = points.firstOrNull() ?: _state.value.userLocation
+            userLocation = points.firstOrNull() ?: _state.value.userLocation,
+            // Capture destination metadata when /api/route-to-amenity provided it,
+            // otherwise keep whatever executeRouteToAmenity seeded.
+            destinationAmenityId = response.destination_amenity_id
+                ?: _state.value.destinationAmenityId,
+            lastKnownDestinationStatus = response.destination_status
+                ?: _state.value.lastKnownDestinationStatus,
+            lastKnownDestinationOccupancy = response.destination_occupancy
+                ?: _state.value.lastKnownDestinationOccupancy,
+            // A fresh route clears any previous mid-route prompt.
+            pendingReroutePrompt = null,
         )
+
+        // Resume simulation on the new waypoints.
+        if (wasSimulating) startSimulation()
     }
 
     fun startSimulation() {

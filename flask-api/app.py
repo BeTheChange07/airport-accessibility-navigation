@@ -2,8 +2,9 @@
 
 import os
 import math
+import socket
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, send_from_directory, render_template_string
+from flask import Flask, jsonify, request, send_from_directory, render_template_string, redirect
 from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -122,6 +123,12 @@ def get_direction_instruction(from_node, to_node, prev_direction, current_direct
             return "Slight left"
 
     return "Continue"
+
+
+@app.route('/')
+def root():
+    """Landing page: send visitors straight to the admin hub."""
+    return redirect('/admin', code=302)
 
 
 @app.route('/map')
@@ -429,6 +436,9 @@ def get_amenities():
                    COALESCE(n.lat, a.latitude)  AS latitude,
                    COALESCE(n.lng, a.longitude) AS longitude,
                    a.status,
+                   a.occupancy,
+                   a.crowdlevel,
+                   a.lastupdated,
                    a.wheelchairaccessible,
                    (LOWER(COALESCE(a.wheelchairaccessible, '')) = 'yes') AS has_accessible_unit,
                    {AMENITY_DERIVED_ZONE_EXPR} AS zone
@@ -525,10 +535,21 @@ def route_to_amenity():
 
         start_zone = start['zone'] or 'public'
 
-        # Only return amenities in the same zone as the user.
+        # Candidate filters shared by both branches:
+        #   - zone match (same side of TSA as the user)
+        #   - status must be active ('open' or 'busy') — admin-closed /
+        #     under-maintenance amenities are not routable targets (UC7).
+        #   - occupancy, if tracked, must not be 'full' — a filled restroom
+        #     (UC5) is silently skipped so the user gets the next-nearest.
+        #     Amenities that don't track occupancy (non-restrooms) have
+        #     occupancy IS NULL and pass this filter.
+        routable_status_filter = "a.status IN ('open', 'busy')"
+        routable_occupancy_filter = "(a.occupancy IS NULL OR a.occupancy <> 'full')"
+
         if accessible:
             cur.execute(f"""
                 SELECT a.id AS amenity_id, a.nodeID, a.name, a.type,
+                       a.status, a.occupancy, a.crowdlevel,
                        a.latitude, a.longitude,
                        n.lat AS node_lat, n.lng AS node_lng,
                        {AMENITY_DERIVED_ZONE_EXPR} AS node_zone
@@ -538,6 +559,8 @@ def route_to_amenity():
                 WHERE a.type = %s
                   AND {AMENITY_DERIVED_ZONE_EXPR} = %s
                   AND LOWER(COALESCE(a.wheelchairaccessible, '')) = 'yes'
+                  AND {routable_status_filter}
+                  AND {routable_occupancy_filter}
             """, (amenity_type, start_zone))
             candidates = cur.fetchall()
 
@@ -548,6 +571,7 @@ def route_to_amenity():
         else:
             cur.execute(f"""
                 SELECT a.id AS amenity_id, a.nodeID, a.name, a.type,
+                       a.status, a.occupancy, a.crowdlevel,
                        a.latitude, a.longitude,
                        n.lat AS node_lat, n.lng AS node_lng,
                        {AMENITY_DERIVED_ZONE_EXPR} AS node_zone
@@ -556,6 +580,8 @@ def route_to_amenity():
                 {AMENITY_DERIVED_ZONE_JOIN}
                 WHERE a.type = %s
                   AND {AMENITY_DERIVED_ZONE_EXPR} = %s
+                  AND {routable_status_filter}
+                  AND {routable_occupancy_filter}
             """, (amenity_type, start_zone))
             candidates = cur.fetchall()
 
@@ -646,6 +672,10 @@ def route_to_amenity():
             'to_node': target_node_id,
             'amenity_type': amenity_type,
             'destination_name': nearest['name'] or amenity_type,
+            'destination_amenity_id': nearest['amenity_id'],
+            'destination_status': nearest['status'],
+            'destination_occupancy': nearest['occupancy'],
+            'destination_crowdlevel': nearest['crowdlevel'],
             'total_distance': total_distance,
             'num_waypoints': len(waypoints),
             'waypoints': waypoints
@@ -656,5 +686,161 @@ def route_to_amenity():
         return jsonify({'error': str(e)}), 500
 
 
+# ---------------------------------------------------------------------------
+# Admin portal (Iteration 2 / UC7)
+#
+# The admin portal is a small in-repo tool for staff. It's unauthenticated
+# by design for the Iteration 2 demo — full login is UC4 (Iteration 3).
+# ---------------------------------------------------------------------------
+
+ADMIN_ALLOWED_STATUSES = ('open', 'busy', 'closed', 'maintenance', 'out_of_service')
+
+
+def _serve_html(path, inject_maps_key=True):
+    """Read an HTML file from disk and return it, optionally injecting the Maps key."""
+    with open(path, 'r', encoding='utf-8') as f:
+        html = f.read()
+    if inject_maps_key:
+        html = html.replace('{{MAPS_API_KEY}}', os.environ.get('MAPS_API_KEY', ''))
+    return html
+
+
+@app.route('/admin')
+def admin_home():
+    """Admin hub landing page with links to amenities, calibrate, map, nav editor."""
+    path = os.path.join(os.path.dirname(__file__), 'templates', 'admin_home.html')
+    return _serve_html(path, inject_maps_key=False)
+
+
+@app.route('/admin/amenities')
+def admin_amenities_page():
+    """Amenity status + occupancy control page (UC7 + demo lever for UC5)."""
+    path = os.path.join(os.path.dirname(__file__), 'templates', 'admin_amenities.html')
+    return _serve_html(path, inject_maps_key=False)
+
+
+@app.route('/admin/nav-editor')
+def admin_nav_editor():
+    """Serve the existing affine-transform nav editor from repo root, unmodified."""
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    path = os.path.join(repo_root, 'nav_editor (1).html')
+    return _serve_html(path, inject_maps_key=True)
+
+
+@app.route('/api/admin/amenity/<int:amenity_id>/status', methods=['POST'])
+def admin_update_amenity_status(amenity_id):
+    """UC7: set an amenity's status."""
+    body = request.get_json(silent=True) or {}
+    new_status = body.get('status')
+    if new_status not in ADMIN_ALLOWED_STATUSES:
+        return jsonify({
+            'error': f'status must be one of {list(ADMIN_ALLOWED_STATUSES)}'
+        }), 400
+
+    try:
+        c = databaseConnection.cursor()
+        c.execute("""
+            UPDATE amenities
+            SET status = %s,
+                lastupdated = NOW()
+            WHERE id = %s
+            RETURNING id, name, type, status, occupancy, crowdlevel, lastupdated
+        """, (new_status, amenity_id))
+        row = c.fetchone()
+        databaseConnection.commit()
+        c.close()
+        if not row:
+            return jsonify({'error': f'Amenity {amenity_id} not found'}), 404
+        return jsonify(row)
+    except Exception as e:
+        databaseConnection.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/admin/amenity/<int:amenity_id>/occupancy', methods=['POST'])
+def admin_force_amenity_occupancy(amenity_id):
+    """Demo-control lever: force all stalls occupied ('full') or vacant ('empty').
+
+    Restrooms only. Atomically flips every amenityunits row for this amenity,
+    then sets the amenity-level occupancy bucket so the aggregator mock
+    doesn't undo it on its next tick.
+    """
+    body = request.get_json(silent=True) or {}
+    state = body.get('state')
+    if state not in ('full', 'empty'):
+        return jsonify({'error': "state must be 'full' or 'empty'"}), 400
+    occupied_bool = (state == 'full')
+
+    try:
+        c = databaseConnection.cursor()
+        c.execute("SELECT id, type FROM amenities WHERE id = %s", (amenity_id,))
+        amenity_row = c.fetchone()
+        if not amenity_row:
+            c.close()
+            return jsonify({'error': f'Amenity {amenity_id} not found'}), 404
+        if amenity_row['type'] != 'restroom':
+            c.close()
+            return jsonify({
+                'error': 'Occupancy control only applies to restrooms'
+            }), 400
+
+        c.execute("""
+            UPDATE amenityunits
+            SET occupied = %s,
+                lastupdated = NOW()
+            WHERE amenityid = %s
+        """, (occupied_bool, amenity_id))
+
+        c.execute("""
+            UPDATE amenities
+            SET occupancy = %s,
+                lastupdated = NOW()
+            WHERE id = %s
+            RETURNING id, name, type, status, occupancy, crowdlevel, lastupdated
+        """, (state, amenity_id))
+        row = c.fetchone()
+        databaseConnection.commit()
+        c.close()
+        return jsonify(row)
+    except Exception as e:
+        databaseConnection.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+def _detect_lan_ip():
+    """Return the IP address Flask will advertise on the LAN.
+
+    Honors the HOST_IP env var if set, otherwise uses the OS's outbound
+    interface (same trick Flask/Werkzeug uses for its "Running on" line).
+    Falls back to localhost if both paths fail.
+    """
+    configured = os.environ.get('HOST_IP')
+    if configured:
+        return configured
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            # No packets are actually sent — just asks the OS which interface
+            # would handle traffic to an arbitrary external address.
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+
+
 if __name__ == '__main__':
+    # Print a visible reminder of the admin portal URL at startup. Guarded so
+    # Flask's debug-mode reloader doesn't print it twice (once per process).
+    if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+        lan_ip = _detect_lan_ip()
+        banner_lines = [
+            "",
+            "=" * 60,
+            "  Admin portal:   http://127.0.0.1:5000/admin",
+        ]
+        if lan_ip and lan_ip != "127.0.0.1":
+            banner_lines.append(f"  LAN:            http://{lan_ip}:5000/admin")
+        banner_lines.append("  (Or just open the root URL — it redirects.)")
+        banner_lines.append("=" * 60)
+        banner_lines.append("")
+        print("\n".join(banner_lines), flush=True)
     app.run(host='0.0.0.0', port=5000, debug=True)

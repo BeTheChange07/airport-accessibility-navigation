@@ -157,27 +157,29 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                     width = 12f
                 )
 
-                // End marker
+                // End marker. Uses rose/pink so it doesn't collide with the
+                // "full restroom = red" amenity-marker color — otherwise an
+                // empty destination restroom looks like it's full.
                 val endMarkerState = rememberMarkerState(
                     position = state.routePoints.last()
                 )
                 Marker(
                     state = endMarkerState,
                     title = state.destinationName ?: "Destination",
-                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED)
+                    snippet = "Destination",
+                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_ROSE)
                 )
             }
 
             // Amenity markers (filtered)
             val visibleAmenities = filteredAmenities(state)
             visibleAmenities.forEach { amenity ->
-                key(amenity.id) {
-                    val hue = when (amenity.status.lowercase()) {
-                        "open" -> BitmapDescriptorFactory.HUE_GREEN
-                        "closed" -> BitmapDescriptorFactory.HUE_VIOLET
-                        "maintenance", "cleaning" -> BitmapDescriptorFactory.HUE_ORANGE
-                        else -> BitmapDescriptorFactory.HUE_YELLOW
-                    }
+                // Include status + occupancy in the key so the marker is
+                // recreated (not just recomposed) when those change. Works
+                // around a maps-compose quirk where icon changes on an
+                // already-placed marker don't always reach the native map.
+                key(amenity.id, amenity.status, amenity.occupancy) {
+                    val hue = amenityMarkerHue(amenity)
                     val pos = LatLng(amenity.latitude, amenity.longitude)
                     val markerState = rememberMarkerState(position = pos)
                     // Force-sync position so filtering doesn't leave a stale LatLng.
@@ -185,7 +187,7 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                     Marker(
                         state = markerState,
                         title = amenity.name,
-                        snippet = "${amenity.type} · ${amenity.status}",
+                        snippet = amenityMarkerSnippet(amenity),
                         icon = BitmapDescriptorFactory.defaultMarker(hue),
                         onClick = {
                             viewModel.selectAmenity(amenity)
@@ -334,6 +336,61 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                 dismissButton = {
                     TextButton(onClick = { viewModel.cancelCrossZoneRoute() }) {
                         Text("Cancel")
+                    }
+                }
+            )
+        }
+
+        // UC5: route-start warning when the user taps a specific high/full restroom.
+        state.pendingOccupancyWarning?.let { amenity ->
+            val level = amenity.occupancy?.lowercase() ?: "high"
+            val headline = if (level == "full") "This restroom is full."
+                else "This restroom is high-occupancy."
+            AlertDialog(
+                onDismissRequest = { viewModel.dismissOccupancyWarning() },
+                title = { Text("Destination is busy") },
+                text = {
+                    Text(
+                        "$headline You can still route to ${amenity.name}, but " +
+                            "the next-nearest restroom may be a better option. Route anyway?"
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.confirmOccupancyWarning() }) {
+                        Text("Route anyway")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { viewModel.dismissOccupancyWarning() }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+
+        // UC5 + UC7: mid-route prompt when the destination just became full/closed.
+        state.pendingReroutePrompt?.let { prompt ->
+            val reasonText = when (prompt.reason) {
+                "full" -> "${prompt.originalDestinationName} just filled up."
+                "closed" -> "${prompt.originalDestinationName} is now closed."
+                else -> "${prompt.originalDestinationName} is no longer available."
+            }
+            AlertDialog(
+                onDismissRequest = { viewModel.declineReroutePrompt() },
+                title = { Text("Reroute?") },
+                text = {
+                    Text(
+                        "$reasonText Reroute to the next-nearest ${prompt.amenityType}?"
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.acceptReroutePrompt() }) {
+                        Text("Reroute")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { viewModel.declineReroutePrompt() }) {
+                        Text("Keep going")
                     }
                 }
             )
@@ -652,11 +709,63 @@ fun FiltersSection(state: NavigationState, viewModel: NavigationViewModel) {
     }
 }
 
+/**
+ * Marker hue for an amenity.
+ *
+ * Admin-set status wins when it's non-active (closed / out_of_service / maintenance),
+ * so a staffer can always pick those out at a glance. Otherwise, for restrooms,
+ * the marker gradients with occupancy: green → yellow → orange → red as it
+ * fills up. Non-restrooms ignore occupancy (they don't track it) and stay green
+ * unless their status is "busy".
+ */
+internal fun amenityMarkerHue(amenity: Amenity): Float {
+    val status = amenity.status.lowercase()
+    if (status == "closed" || status == "out_of_service") {
+        return BitmapDescriptorFactory.HUE_VIOLET
+    }
+    if (status == "maintenance" || status == "cleaning") {
+        return BitmapDescriptorFactory.HUE_ORANGE
+    }
+    if (status == "busy") {
+        return BitmapDescriptorFactory.HUE_YELLOW
+    }
+    // status == open (or unknown) — restrooms gradient by occupancy bucket.
+    return when (amenity.occupancy?.lowercase()) {
+        "full" -> BitmapDescriptorFactory.HUE_RED
+        "high" -> BitmapDescriptorFactory.HUE_ORANGE
+        "medium" -> BitmapDescriptorFactory.HUE_YELLOW
+        "low", "empty" -> BitmapDescriptorFactory.HUE_GREEN
+        else -> BitmapDescriptorFactory.HUE_GREEN    // non-restrooms / unknown
+    }
+}
+
+/**
+ * One-line snippet under an amenity marker. For restrooms, surfaces live
+ * occupancy bucket and crowd bucket. Other types keep the original compact form.
+ */
+internal fun amenityMarkerSnippet(amenity: Amenity): String {
+    if (amenity.type != "restroom") {
+        return "${amenity.type} · ${amenity.status}"
+    }
+    val parts = mutableListOf(amenity.status)
+    amenity.occupancy?.takeIf { it.isNotBlank() }?.let { parts.add("occ: $it") }
+    amenity.crowdlevel?.let { parts.add("wait: ${crowdBucketLabel(it)}") }
+    return parts.joinToString(" · ")
+}
+
+/** Bucket a 0..100 crowd level into Low / Moderate / Heavy for display. */
+internal fun crowdBucketLabel(level: Int): String = when {
+    level < 34 -> "Low"
+    level < 67 -> "Moderate"
+    else -> "Heavy"
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AmenityDetailSheet(amenity: Amenity, onRouteHere: () -> Unit, onClose: () -> Unit) {
     val isAccessible = amenity.has_accessible_unit == true ||
         amenity.wheelchairaccessible.equals("yes", ignoreCase = true)
+    val isRestroom = amenity.type == "restroom"
 
     ModalBottomSheet(onDismissRequest = onClose) {
         Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
@@ -665,6 +774,26 @@ fun AmenityDetailSheet(amenity: Amenity, onRouteHere: () -> Unit, onClose: () ->
             Text(amenity.type.replaceFirstChar { it.uppercase() }, fontSize = 14.sp, color = Color.Gray)
             Spacer(modifier = Modifier.height(8.dp))
             Text("Status: ${amenity.status}", fontSize = 14.sp)
+            if (isRestroom) {
+                amenity.occupancy?.takeIf { it.isNotBlank() }?.let { bucket ->
+                    val color = when (bucket) {
+                        "full" -> Color(0xFFD32F2F)
+                        "high" -> Color(0xFFF57C00)
+                        "medium" -> Color(0xFFF9A825)
+                        "low" -> Color(0xFF2E7D32)
+                        "empty" -> Color(0xFF2E7D32)
+                        else -> Color.Gray
+                    }
+                    Text(
+                        "Occupancy: ${bucket.replaceFirstChar { it.uppercase() }}",
+                        fontSize = 14.sp,
+                        color = color
+                    )
+                }
+                amenity.crowdlevel?.let { level ->
+                    Text("Wait: ${crowdBucketLabel(level)} ($level)", fontSize = 14.sp)
+                }
+            }
             Text(
                 text = if (isAccessible) "♿ Wheelchair accessible" else "Not wheelchair accessible",
                 fontSize = 14.sp,
@@ -706,11 +835,17 @@ fun AmenityListSheet(
                 items(amenities, key = { it.id }) { amenity ->
                     val isAccessible = amenity.has_accessible_unit == true ||
                         amenity.wheelchairaccessible.equals("yes", ignoreCase = true)
+                    // Match the map marker hue so the list and map agree at a glance.
                     val statusColor = when (amenity.status.lowercase()) {
-                        "open" -> Color(0xFF34A853)
-                        "closed" -> Color(0xFF9E9E9E)
-                        "maintenance", "cleaning" -> Color(0xFFFF9800)
-                        else -> Color(0xFFFFC107)
+                        "closed", "out_of_service" -> Color(0xFF9C27B0)    // violet
+                        "maintenance", "cleaning" -> Color(0xFFFF9800)     // orange
+                        "busy" -> Color(0xFFFFC107)                        // yellow
+                        else -> when (amenity.occupancy?.lowercase()) {    // open + restroom gradient
+                            "full" -> Color(0xFFD32F2F)
+                            "high" -> Color(0xFFF57C00)
+                            "medium" -> Color(0xFFF9A825)
+                            else -> Color(0xFF34A853)                      // low / empty / non-restroom
+                        }
                     }
                     Row(
                         modifier = Modifier
