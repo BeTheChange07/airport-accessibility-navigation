@@ -757,19 +757,33 @@ def admin_update_amenity_status(amenity_id):
         return jsonify({'error': str(e)}), 500
 
 
+# Fraction of stalls that should be occupied for each admin bucket.
+# Thresholds match occupancySensors.py so the sensor's next roll-up tick
+# won't overwrite an admin-set bucket.
+OCCUPANCY_STATE_FRACTIONS = {
+    'empty':  0.0,
+    'medium': 1 / 3,
+    'high':   2 / 3,
+    'full':   1.0,
+}
+
+
 @app.route('/api/admin/amenity/<int:amenity_id>/occupancy', methods=['POST'])
 def admin_force_amenity_occupancy(amenity_id):
-    """Demo-control lever: force all stalls occupied ('full') or vacant ('empty').
+    """Demo-control lever: set a restroom's occupancy to empty / medium / high / full.
 
-    Restrooms only. Atomically flips every amenityunits row for this amenity,
-    then sets the amenity-level occupancy bucket so the aggregator mock
-    doesn't undo it on its next tick.
+    Restrooms only. Flips a proportional number of amenityunits rows
+    occupied (stalls 1..N TRUE, the rest FALSE, ordered by unitid) and sets
+    the aggregate amenities.occupancy bucket to match. Because the stall
+    count and bucket agree after this runs, the occupancySensors.py roll-up
+    won't undo the change on its next tick.
     """
     body = request.get_json(silent=True) or {}
     state = body.get('state')
-    if state not in ('full', 'empty'):
-        return jsonify({'error': "state must be 'full' or 'empty'"}), 400
-    occupied_bool = (state == 'full')
+    if state not in OCCUPANCY_STATE_FRACTIONS:
+        return jsonify({
+            'error': f"state must be one of {sorted(OCCUPANCY_STATE_FRACTIONS)}"
+        }), 400
 
     try:
         c = databaseConnection.cursor()
@@ -784,12 +798,25 @@ def admin_force_amenity_occupancy(amenity_id):
                 'error': 'Occupancy control only applies to restrooms'
             }), 400
 
+        # How many stalls does this restroom actually have? Derived instead
+        # of hard-coded so a restroom seeded with something other than 6
+        # still lines up with the bucket thresholds.
+        c.execute(
+            "SELECT COUNT(*) AS total FROM amenityunits WHERE amenityid = %s",
+            (amenity_id,),
+        )
+        total_row = c.fetchone() or {}
+        total_stalls = total_row.get('total', 0) or 0
+        n_occupied = round(total_stalls * OCCUPANCY_STATE_FRACTIONS[state])
+
+        # Stalls 1..n_occupied become occupied, the rest vacant. One UPDATE
+        # touches every row so lastupdated reflects the whole batch.
         c.execute("""
             UPDATE amenityunits
-            SET occupied = %s,
+            SET occupied = (unitid <= %s),
                 lastupdated = NOW()
             WHERE amenityid = %s
-        """, (occupied_bool, amenity_id))
+        """, (n_occupied, amenity_id))
 
         c.execute("""
             UPDATE amenities

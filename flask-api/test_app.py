@@ -389,7 +389,10 @@ class TestAdminEndpoints:
         """Admin 'Mark full' locks all stalls and sets the amenity bucket."""
         # First fetchone: restroom type check.
         cur.queue_fetchone({"id": 5, "type": "restroom"})
-        # Second fetchone: RETURNING row after the bucket UPDATE.
+        # Second fetchone: stall count (drives how many amenityunits rows
+        # get flipped to occupied for partial states like medium / high).
+        cur.queue_fetchone({"total": 6})
+        # Third fetchone: RETURNING row after the bucket UPDATE.
         cur.queue_fetchone({
             "id": 5, "name": "D5 Restroom", "type": "restroom",
             "status": "open", "occupancy": "full", "crowdlevel": 10,
@@ -425,10 +428,10 @@ class TestAdminEndpoints:
         assert res.status_code == 400
 
     def test_set_occupancy_rejects_bad_state(self, client):
-        """state must be 'full' or 'empty'."""
+        """state must be one of empty / medium / high / full."""
         res = client.post(
             "/api/admin/amenity/5/occupancy",
-            json={"state": "half"},
+            json={"state": "bogus"},
         )
         assert res.status_code == 400
 

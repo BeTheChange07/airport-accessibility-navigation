@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Manage Amenities — Admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --panel-border: #334155;
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent-hover: #0ea5e9;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --orange: #f97316;
+    --purple: #a855f7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 1.5rem;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  header {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 1rem;
+    margin-bottom: 1.25rem;
+  }
+  header h1 { margin: 0; font-size: 1.5rem; font-weight: 600; }
+  header a { color: var(--accent); text-decoration: none; font-size: .9rem; }
+  header a:hover { text-decoration: underline; }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: .75rem; align-items: center;
+    margin-bottom: 1rem;
+  }
+  .controls label { font-size: .85rem; color: var(--text-muted); }
+  select, input[type="text"] {
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--panel-border); border-radius: 6px;
+    padding: .4rem .6rem; font: inherit;
+  }
+  button {
+    background: var(--accent); color: #0c1220;
+    border: none; border-radius: 6px;
+    padding: .35rem .75rem; font: inherit; font-weight: 500;
+    cursor: pointer;
+  }
+  button:hover { background: var(--accent-hover); }
+  button.subtle {
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--panel-border);
+  }
+  button.subtle:hover { background: #334155; }
+  button.danger { background: var(--red); color: #fff; }
+  button.danger:hover { background: #dc2626; }
+  button.success { background: var(--green); color: #0c1220; }
+  button.success:hover { background: #16a34a; }
+  button.warning { background: var(--yellow); color: #0c1220; }
+  button.warning:hover { background: #ca8a04; }
+  button.caution { background: var(--orange); color: #0c1220; }
+  button.caution:hover { background: #ea580c; }
+  table {
+    width: 100%; border-collapse: collapse;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: 10px; overflow: hidden;
+  }
+  th, td {
+    padding: .6rem .75rem; text-align: left; font-size: .9rem;
+    border-bottom: 1px solid var(--panel-border);
+    vertical-align: middle;
+  }
+  th {
+    background: #111827; color: var(--text-muted); font-weight: 500;
+    font-size: .75rem; letter-spacing: .05em; text-transform: uppercase;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr.just-updated { animation: flash 1.4s ease; }
+  @keyframes flash {
+    0%   { background: rgba(56, 189, 248, .25); }
+    100% { background: transparent; }
+  }
+  .status-pill {
+    display: inline-block; padding: .15rem .5rem;
+    border-radius: 999px; font-size: .75rem; font-weight: 500;
+  }
+  .status-open { background: rgba(34,197,94,.15); color: var(--green); }
+  .status-busy { background: rgba(234,179,8,.15); color: var(--yellow); }
+  .status-closed, .status-out_of_service {
+    background: rgba(239,68,68,.15); color: var(--red);
+  }
+  .status-maintenance { background: rgba(249,115,22,.15); color: var(--orange); }
+  .occupancy-pill {
+    display: inline-block; padding: .15rem .5rem;
+    border-radius: 999px; font-size: .75rem;
+    background: var(--panel-border); color: var(--text);
+  }
+  .occupancy-full   { background: rgba(239,68,68,.2); color: var(--red); }
+  .occupancy-high   { background: rgba(249,115,22,.2); color: var(--orange); }
+  .occupancy-medium { background: rgba(234,179,8,.2); color: var(--yellow); }
+  .occupancy-low    { background: rgba(34,197,94,.15); color: var(--green); }
+  .occupancy-empty  { background: rgba(148,163,184,.15); color: var(--text-muted); }
+  .zone-pill {
+    display: inline-block; padding: .15rem .5rem;
+    border-radius: 999px; font-size: .72rem; font-weight: 500;
+    letter-spacing: .04em; text-transform: uppercase;
+  }
+  .zone-public { background: rgba(59,130,246,.15); color: #60a5fa; }
+  .zone-secure { background: rgba(245,158,11,.15); color: #fbbf24; }
+  .zone-unknown { background: var(--panel-border); color: var(--text-muted); }
+  .row-actions { display: flex; gap: .35rem; flex-wrap: wrap; }
+  #toast {
+    position: fixed; bottom: 1rem; right: 1rem;
+    padding: .6rem 1rem; border-radius: 8px;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    color: var(--text); font-size: .9rem;
+    opacity: 0; transform: translateY(.5rem);
+    transition: opacity .2s ease, transform .2s ease;
+    pointer-events: none;
+    max-width: 22rem;
+  }
+  #toast.show { opacity: 1; transform: none; }
+  #toast.err { border-color: var(--red); color: #fecaca; }
+  .last-updated { font-size: .75rem; color: var(--text-muted); }
+  .muted { color: var(--text-muted); }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Manage Amenities</h1>
+    <a href="/admin">← back to admin home</a>
+  </header>
+
+  <div class="controls">
+    <label for="typeFilter">Type</label>
+    <select id="typeFilter"></select>
+    <label for="zoneFilter">Zone</label>
+    <select id="zoneFilter">
+      <option value="__all__">All zones</option>
+      <option value="public">Public (pre-TSA)</option>
+      <option value="secure">Secure (post-TSA)</option>
+    </select>
+    <button id="refreshBtn" class="subtle">Refresh</button>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Name</th>
+        <th>Type</th>
+        <th>Zone</th>
+        <th>Status</th>
+        <th>Occupancy</th>
+        <th>Actions</th>
+        <th>Last updated</th>
+      </tr>
+    </thead>
+    <tbody id="tbody">
+      <tr><td colspan="8" class="muted">Loading amenities…</td></tr>
+    </tbody>
+  </table>
+
+  <div id="toast"></div>
+
+<script>
+const STATUS_OPTIONS = ['open', 'busy', 'closed', 'maintenance', 'out_of_service'];
+const DEFAULT_FILTER = 'restroom';
+
+let amenities = [];
+let currentFilter = DEFAULT_FILTER;
+let currentZone = '__all__';
+
+function toast(message, isError=false) {
+  const el = document.getElementById('toast');
+  el.textContent = message;
+  el.classList.toggle('err', !!isError);
+  el.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.remove('show'), 2800);
+}
+
+function formatStamp(iso) {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleTimeString(); } catch (e) { return iso; }
+}
+
+async function fetchAmenities() {
+  const res = await fetch('/api/amenities');
+  if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+  const data = await res.json();
+  amenities = data.amenities || [];
+  rebuildTypeFilter();
+  render();
+}
+
+function rebuildTypeFilter() {
+  const select = document.getElementById('typeFilter');
+  const types = Array.from(new Set(amenities.map(a => a.type))).sort();
+  const prev = select.value || currentFilter;
+  select.innerHTML = '<option value="__all__">All types</option>'
+    + types.map(t => `<option value="${t}">${t}</option>`).join('');
+  if (types.includes(prev)) select.value = prev;
+  else if (prev === '__all__') select.value = '__all__';
+  else if (types.includes(DEFAULT_FILTER)) select.value = DEFAULT_FILTER;
+  else select.value = '__all__';
+  currentFilter = select.value;
+}
+
+function render() {
+  const tbody = document.getElementById('tbody');
+  const rows = amenities
+    .filter(a => currentFilter === '__all__' || a.type === currentFilter)
+    .filter(a => currentZone === '__all__' || a.zone === currentZone)
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="muted">No amenities match this filter.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map(a => renderRow(a)).join('');
+}
+
+function renderRow(a) {
+  const statusClass = `status-${(a.status || 'open').replace(/ /g, '_')}`;
+  const occupancyLabel = a.occupancy || '—';
+  const occupancyClass = a.occupancy ? `occupancy-${a.occupancy}` : '';
+  const options = STATUS_OPTIONS.map(s =>
+    `<option value="${s}"${s === a.status ? ' selected' : ''}>${s}</option>`
+  ).join('');
+  const isRestroom = a.type === 'restroom';
+  const occActions = isRestroom ? `
+    <button class="success" onclick="forceOccupancy(${a.id}, 'empty')">Empty</button>
+    <button class="warning" onclick="forceOccupancy(${a.id}, 'medium')">Medium</button>
+    <button class="caution" onclick="forceOccupancy(${a.id}, 'high')">High</button>
+    <button class="danger" onclick="forceOccupancy(${a.id}, 'full')">Full</button>
+  ` : '';
+  const zoneLabel = a.zone || 'unknown';
+  const zoneClass = `zone-${zoneLabel}`;
+  const zoneDisplay = zoneLabel === 'secure' ? 'Secure' :
+                      zoneLabel === 'public' ? 'Public' : zoneLabel;
+  return `
+    <tr id="row-${a.id}">
+      <td class="muted">${a.id}</td>
+      <td>${escapeHtml(a.name || '')}</td>
+      <td class="muted">${escapeHtml(a.type || '')}</td>
+      <td><span class="zone-pill ${zoneClass}">${zoneDisplay}</span></td>
+      <td>
+        <span class="status-pill ${statusClass}">${a.status || 'open'}</span>
+        <select id="status-${a.id}" style="margin-left:.4rem">${options}</select>
+      </td>
+      <td>
+        ${a.occupancy
+          ? `<span class="occupancy-pill ${occupancyClass}">${occupancyLabel}</span>`
+          : `<span class="muted">—</span>`}
+      </td>
+      <td>
+        <div class="row-actions">
+          <button onclick="saveStatus(${a.id})">Save</button>
+          ${occActions}
+        </div>
+      </td>
+      <td class="last-updated">${formatStamp(a.lastupdated)}</td>
+    </tr>`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+async function saveStatus(id) {
+  const select = document.getElementById(`status-${id}`);
+  const next = select.value;
+  try {
+    const res = await fetch(`/api/admin/amenity/${id}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: next })
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    mergeAmenity(body);
+    render();
+    flashRow(id);
+    toast(`Status set to ${next}.`);
+  } catch (e) {
+    toast(e.message || 'Failed to save status.', true);
+  }
+}
+
+async function forceOccupancy(id, state) {
+  try {
+    const res = await fetch(`/api/admin/amenity/${id}/occupancy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state })
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    mergeAmenity(body);
+    render();
+    flashRow(id);
+    const occMessages = {
+      empty:  'All stalls released — restroom is empty.',
+      medium: 'Stalls set to medium (~1/3 occupied).',
+      high:   'Stalls set to high (~2/3 occupied).',
+      full:   'All stalls locked — restroom is full.',
+    };
+    toast(occMessages[state] || `Occupancy set to ${state}.`);
+  } catch (e) {
+    toast(e.message || 'Failed to update occupancy.', true);
+  }
+}
+
+function mergeAmenity(updated) {
+  const i = amenities.findIndex(a => a.id === updated.id);
+  if (i >= 0) amenities[i] = { ...amenities[i], ...updated };
+}
+
+function flashRow(id) {
+  // Wait for re-render then flash.
+  setTimeout(() => {
+    const el = document.getElementById(`row-${id}`);
+    if (el) {
+      el.classList.remove('just-updated');
+      // force reflow to restart animation
+      void el.offsetWidth;
+      el.classList.add('just-updated');
+    }
+  }, 0);
+}
+
+document.getElementById('typeFilter').addEventListener('change', (e) => {
+  currentFilter = e.target.value;
+  render();
+});
+document.getElementById('zoneFilter').addEventListener('change', (e) => {
+  currentZone = e.target.value;
+  render();
+});
+document.getElementById('refreshBtn').addEventListener('click', () => {
+  fetchAmenities().catch(e => toast(e.message, true));
+});
+
+fetchAmenities().catch(e => toast(e.message, true));
+</script>
+</body>
+</html>

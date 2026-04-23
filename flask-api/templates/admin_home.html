@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Smart Amenities — Admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --panel-border: #334155;
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent-hover: #0ea5e9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2.5rem 1.5rem;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  h1 { margin: 0 0 .25rem 0; font-size: 1.75rem; font-weight: 600; }
+  .subtitle { margin: 0 0 2rem 0; color: var(--text-muted); font-size: .95rem; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 1rem;
+    max-width: 1100px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    color: inherit;
+    text-decoration: none;
+    display: block;
+    transition: transform .15s ease, border-color .15s ease;
+  }
+  .card:hover {
+    transform: translateY(-2px);
+    border-color: var(--accent);
+  }
+  .card h2 {
+    margin: 0 0 .5rem 0; font-size: 1.1rem; font-weight: 600;
+    color: var(--text);
+  }
+  .card p {
+    margin: 0; font-size: .9rem; color: var(--text-muted); line-height: 1.4;
+  }
+  .card .tag {
+    display: inline-block; margin-bottom: .75rem;
+    font-size: .7rem; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--accent);
+  }
+</style>
+</head>
+<body>
+  <h1>Smart Amenities — Admin</h1>
+  <p class="subtitle">DFW Terminal D operations console.</p>
+
+  <div class="grid">
+    <a class="card" href="/admin/amenities">
+      <span class="tag">UC7 · UC5</span>
+      <h2>Manage Amenities</h2>
+      <p>Open, close, or mark restrooms full. Admin-set status overrides the sensor mocks.</p>
+    </a>
+    <a class="card" href="/calibrate">
+      <span class="tag">Build 1 tool</span>
+      <h2>Calibrate Nodes</h2>
+      <p>Adjust nav-node positions on the DFW Terminal D map.</p>
+    </a>
+    <a class="card" href="/map">
+      <span class="tag">Build 1 tool</span>
+      <h2>Nav Map Debug</h2>
+      <p>Visualize all nav nodes, edges, and amenities for route debugging.</p>
+    </a>
+    <a class="card" href="/admin/nav-editor">
+      <span class="tag">Build 1 tool</span>
+      <h2>Nav Editor</h2>
+      <p>Affine-transform editor for authoring the nav graph over the terminal image.</p>
+    </a>
+  </div>
+</body>
+</html>
