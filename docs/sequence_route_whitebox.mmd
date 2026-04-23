@@ -1,0 +1,30 @@
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant MA as MainActivity.kt
+    participant VM as NavigationViewModel.kt
+    participant API as NavigationApi.kt
+    participant F as flask-api/app.py
+    participant PG as PostgreSQL<br/>(pgRouting)
+
+    U->>MA: tap "Route Here"
+    MA->>VM: routeToSpecificAmenity(amenity)
+
+    VM->>API: getNearestNode(lat, lng, zone)
+    API->>F: GET /api/nearest
+    F->>PG: SELECT nearest node<br/>(zone-filtered)
+    PG-->>F: node row
+    F-->>API: 200 NearestNodeResponse
+    API-->>VM: NearestNodeResponse
+
+    VM->>API: getRoute(fromNode, toNode)
+    API->>F: GET /api/route
+    F->>PG: pgr_dijkstra over nav_edges
+    PG-->>F: path node ids
+    F->>PG: hydrate path<br/>(JOIN nav_nodes)
+    PG-->>F: path rows with lat/lng
+    F-->>API: 200 RouteResponse
+    API-->>VM: RouteResponse
+
+    VM-->>MA: StateFlow emit<br/>(routePoints, waypoints)
+    MA-->>U: render polyline +<br/>destination pin

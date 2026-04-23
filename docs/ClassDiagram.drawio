@@ -1,0 +1,165 @@
+<mxfile host="app.diagrams.net" modified="2026-04-08T00:00:00.000Z" agent="draw.io" version="24.0.0" type="device">
+  <diagram id="smart-amenities-class-diagram" name="Smart Amenities Finder">
+    <mxGraphModel dx="1600" dy="1100" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- =============================================================== -->
+        <!-- SWIMLANE BACKGROUNDS                                            -->
+        <!-- =============================================================== -->
+        <mxCell id="tier_android" value="ANDROID CLIENT  (Kotlin)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f0f8ff;strokeColor=#4d6088;dashed=1;fontSize=16;fontStyle=1;verticalAlign=top;align=left;spacingLeft=14;spacingTop=10;fillOpacity=40" vertex="1" parent="1">
+          <mxGeometry x="20" y="20" width="1660" height="690" as="geometry" />
+        </mxCell>
+        <mxCell id="tier_flask" value="FLASK API + DATABASE  (Python / PostgreSQL)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff8f0;strokeColor=#a0703a;dashed=1;fontSize=16;fontStyle=1;verticalAlign=top;align=left;spacingLeft=14;spacingTop=10;fillOpacity=40" vertex="1" parent="1">
+          <mxGeometry x="20" y="730" width="1660" height="650" as="geometry" />
+        </mxCell>
+
+        <!-- =============================================================== -->
+        <!-- ANDROID TIER                                                    -->
+        <!-- =============================================================== -->
+
+        <!-- MainActivity -->
+        <mxCell id="MainActivity" value="&lt;b&gt;MainActivity&lt;/b&gt;&lt;br&gt;&lt;i&gt;: ComponentActivity&lt;/i&gt;&lt;hr size=&quot;1&quot;&gt;- fusedLocationClient&lt;br&gt;- latestViewModel: NavigationViewModel?&lt;hr size=&quot;1&quot;&gt;+ onCreate(state: Bundle?)&lt;br&gt;- startLocationUpdates()" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;verticalAlign=top;spacingLeft=6;spacingRight=6;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="60" y="80" width="240" height="170" as="geometry" />
+        </mxCell>
+
+        <!-- NavigationViewModel -->
+        <mxCell id="NavigationViewModel" value="&lt;b&gt;NavigationViewModel&lt;/b&gt;&lt;br&gt;&lt;i&gt;: ViewModel&lt;/i&gt;&lt;hr size=&quot;1&quot;&gt;- api: NavigationApiService&lt;hr size=&quot;1&quot;&gt;+ loadAmenities()&lt;br&gt;+ setMockStart(zone: String)&lt;br&gt;+ routeToAmenity(type: String)&lt;br&gt;+ routeToSpecificAmenity(amenity: Amenity)&lt;br&gt;+ startSimulation() / stopSimulation()&lt;br&gt;+ goOffPath()&lt;br&gt;+ updateUserLocation(loc: LatLng)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;verticalAlign=top;spacingLeft=6;spacingRight=6;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="340" y="80" width="320" height="250" as="geometry" />
+        </mxCell>
+
+        <!-- Waypoint -->
+        <mxCell id="Waypoint" value="&lt;b&gt;Waypoint&lt;/b&gt;&lt;br&gt;&lt;i&gt;&amp;laquo;data class&amp;raquo;&lt;/i&gt;&lt;hr size=&quot;1&quot;&gt;+ seq: Int&lt;br&gt;+ node_id: Int&lt;br&gt;+ latitude: Double&lt;br&gt;+ longitude: Double&lt;br&gt;+ instruction: String&lt;br&gt;+ cardinal_direction: String?&lt;br&gt;+ distance_meters: Double?" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;verticalAlign=top;spacingLeft=6;spacingRight=6;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="1020" y="80" width="260" height="200" as="geometry" />
+        </mxCell>
+
+        <!-- Amenity -->
+        <mxCell id="Amenity" value="&lt;b&gt;Amenity&lt;/b&gt;&lt;br&gt;&lt;i&gt;&amp;laquo;data class&amp;raquo;&lt;/i&gt;&lt;hr size=&quot;1&quot;&gt;+ id: Int&lt;br&gt;+ nodeid: Int&lt;br&gt;+ name: String&lt;br&gt;+ type: String&lt;br&gt;+ latitude: Double&lt;br&gt;+ longitude: Double&lt;br&gt;+ status: String&lt;br&gt;+ wheelchairaccessible: String?&lt;br&gt;+ has_accessible_unit: Boolean?&lt;br&gt;+ zone: String?" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;verticalAlign=top;spacingLeft=6;spacingRight=6;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="1320" y="80" width="280" height="260" as="geometry" />
+        </mxCell>
+
+        <!-- NavigationApiService -->
+        <mxCell id="NavigationApiService" value="&lt;b&gt;NavigationApiService&lt;/b&gt;&lt;br&gt;&lt;i&gt;&amp;laquo;interface&amp;raquo; (Retrofit)&lt;/i&gt;&lt;hr size=&quot;1&quot;&gt;+ getRoute(fromNode: Int, toNode: Int): Route&lt;br&gt;+ getNearestNode(lat: Double, lng: Double, zone: String?): Node&lt;br&gt;+ getAmenities(): List[Amenity]&lt;br&gt;+ getAmenityTypes(): List[String]&lt;br&gt;+ getRouteToAmenity(fromNode: Int, type: String, accessible: Boolean?): Route&lt;br&gt;+ getRandomNode(zone: String): Node" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;verticalAlign=top;spacingLeft=6;spacingRight=6;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="340" y="430" width="640" height="200" as="geometry" />
+        </mxCell>
+
+        <!-- =============================================================== -->
+        <!-- FLASK TIER                                                      -->
+        <!-- =============================================================== -->
+
+        <!-- FlaskApp -->
+        <mxCell id="FlaskApp" value="&lt;b&gt;FlaskApp&lt;/b&gt;&lt;br&gt;&lt;i&gt;&amp;laquo;module&amp;raquo;  flask-api/app.py&lt;/i&gt;&lt;hr size=&quot;1&quot;&gt;+ get_route(from_node, to_node)  &lt;i&gt;[/api/route]&lt;/i&gt;&lt;br&gt;+ nearest_node(lat, lng, zone?)  &lt;i&gt;[/api/nearest]&lt;/i&gt;&lt;br&gt;+ get_amenities()  &lt;i&gt;[/api/amenities]&lt;/i&gt;&lt;br&gt;+ get_amenity_types()  &lt;i&gt;[/api/amenity-types]&lt;/i&gt;&lt;br&gt;+ route_to_amenity(from_node, type, accessible?)&lt;br&gt;+ get_random_node(zone)  &lt;i&gt;[/api/random-node]&lt;/i&gt;&lt;br&gt;+ get_nodes(type?, zone?)  &lt;i&gt;[/api/nodes]&lt;/i&gt;&lt;br&gt;+ get_edges()  &lt;i&gt;[/api/edges]&lt;/i&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;verticalAlign=top;spacingLeft=6;spacingRight=6;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="60" y="790" width="370" height="270" as="geometry" />
+        </mxCell>
+
+        <!-- NearestNodeFinder -->
+        <mxCell id="NearestNodeFinder" value="&lt;b&gt;NearestNodeFinder&lt;/b&gt;&lt;br&gt;&lt;i&gt;flask-api/NearestNodeFinder.py&lt;/i&gt;&lt;hr size=&quot;1&quot;&gt;- points: np.ndarray&lt;br&gt;- tree: KDTree&lt;br&gt;- active_mask: np.ndarray&lt;hr size=&quot;1&quot;&gt;+ deactivate_nodes(indices)&lt;br&gt;+ activate_nodes(indices)&lt;br&gt;+ get_nearest_active_node(query_point, k=10): int" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;verticalAlign=top;spacingLeft=6;spacingRight=6;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="480" y="790" width="320" height="220" as="geometry" />
+        </mxCell>
+
+        <!-- Node entity -->
+        <mxCell id="Node" value="&lt;b&gt;Node&lt;/b&gt;&lt;br&gt;&lt;i&gt;&amp;laquo;entity&amp;raquo;  table: nav_nodes&lt;/i&gt;&lt;hr size=&quot;1&quot;&gt;+ id: int  &lt;i&gt;[PK]&lt;/i&gt;&lt;br&gt;+ latitude: float&lt;br&gt;+ longitude: float&lt;br&gt;+ label: str&lt;br&gt;+ node_type: str&lt;br&gt;+ zone: str  &lt;i&gt;(public | secure)&lt;/i&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;verticalAlign=top;spacingLeft=6;spacingRight=6;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="850" y="790" width="240" height="200" as="geometry" />
+        </mxCell>
+
+        <!-- PostgresRDS -->
+        <mxCell id="PostgresRDS" value="&lt;b&gt;PostgresRDS&lt;/b&gt;&lt;br&gt;&lt;i&gt;&amp;laquo;database&amp;raquo;  AWS RDS + pgRouting&lt;/i&gt;&lt;hr size=&quot;1&quot;&gt;Tables:&lt;br&gt;&amp;nbsp;&amp;nbsp;&amp;bull; nav_nodes&lt;br&gt;&amp;nbsp;&amp;nbsp;&amp;bull; nav_edges&lt;br&gt;&amp;nbsp;&amp;nbsp;&amp;bull; amenities&lt;br&gt;Extension: pgRouting (Dijkstra)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;align=left;verticalAlign=top;spacingLeft=6;spacingRight=6;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="1140" y="790" width="290" height="200" as="geometry" />
+        </mxCell>
+
+        <!-- =============================================================== -->
+        <!-- RELATIONSHIPS                                                   -->
+        <!-- =============================================================== -->
+
+        <!-- MainActivity -> NavigationViewModel -->
+        <mxCell id="e1" style="endArrow=open;html=1;edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0" edge="1" parent="1" source="MainActivity" target="NavigationViewModel">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e1l" value="creates / observes" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10" connectable="0" vertex="1" parent="e1">
+          <mxGeometry x="0" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- NavigationViewModel → NavigationApiService -->
+        <mxCell id="e3" style="endArrow=open;html=1;edgeStyle=orthogonalEdgeStyle;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.3;entryY=0;entryDx=0;entryDy=0" edge="1" parent="1" source="NavigationViewModel" target="NavigationApiService">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3l" value="uses" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10" connectable="0" vertex="1" parent="e3">
+          <mxGeometry x="0" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- NavigationApiService ⇢ Waypoint (returns) -->
+        <mxCell id="e4" style="endArrow=open;dashed=1;html=1;edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.2;exitDx=0;exitDy=0;entryX=0;entryY=0.8;entryDx=0;entryDy=0" edge="1" parent="1" source="NavigationApiService" target="Waypoint">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4l" value="returns" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10" connectable="0" vertex="1" parent="e4">
+          <mxGeometry x="0" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- NavigationApiService ⇢ Amenity (returns) -->
+        <mxCell id="e5" style="endArrow=open;dashed=1;html=1;edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.7;exitDx=0;exitDy=0;entryX=0;entryY=0.7;entryDx=0;entryDy=0" edge="1" parent="1" source="NavigationApiService" target="Amenity">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5l" value="returns" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10" connectable="0" vertex="1" parent="e5">
+          <mxGeometry x="0" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- NavigationApiService → FlaskApp (HTTP/JSON, cross-tier) -->
+        <mxCell id="e6" style="endArrow=open;dashed=1;html=1;edgeStyle=orthogonalEdgeStyle;strokeColor=#cc0000;strokeWidth=2;exitX=0;exitY=1;exitDx=0;exitDy=0;entryX=0.3;entryY=0;entryDx=0;entryDy=0" edge="1" parent="1" source="NavigationApiService" target="FlaskApp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6l" value="&amp;laquo;HTTP / JSON&amp;raquo;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=12;fontStyle=1;fontColor=#cc0000" connectable="0" vertex="1" parent="e6">
+          <mxGeometry x="0" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- FlaskApp → NearestNodeFinder -->
+        <mxCell id="e7" style="endArrow=open;html=1;edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0;entryY=0.3;entryDx=0;entryDy=0" edge="1" parent="1" source="FlaskApp" target="NearestNodeFinder">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7l" value="uses for /api/nearest" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10" connectable="0" vertex="1" parent="e7">
+          <mxGeometry x="0" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- FlaskApp → PostgresRDS -->
+        <mxCell id="e8" style="endArrow=open;html=1;edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.7;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0" edge="1" parent="1" source="FlaskApp" target="PostgresRDS">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8l" value="psycopg2" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10" connectable="0" vertex="1" parent="e8">
+          <mxGeometry x="0" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- PostgresRDS → Node (table representation) -->
+        <mxCell id="e9" style="endArrow=open;dashed=1;html=1;edgeStyle=orthogonalEdgeStyle;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0" edge="1" parent="1" source="PostgresRDS" target="Node">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9l" value="row of nav_nodes" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10" connectable="0" vertex="1" parent="e9">
+          <mxGeometry x="0" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Amenity → Node (FK) -->
+        <mxCell id="e10" style="endArrow=open;html=1;edgeStyle=orthogonalEdgeStyle;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0" edge="1" parent="1" source="Amenity" target="Node">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10l" value="nodeid FK" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10" connectable="0" vertex="1" parent="e10">
+          <mxGeometry x="0" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Waypoint → Node (built from) -->
+        <mxCell id="e11" style="endArrow=open;dashed=1;html=1;edgeStyle=orthogonalEdgeStyle;exitX=0.3;exitY=1;exitDx=0;exitDy=0;entryX=0.3;entryY=0;entryDx=0;entryDy=0" edge="1" parent="1" source="Waypoint" target="Node">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11l" value="built from" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10" connectable="0" vertex="1" parent="e11">
+          <mxGeometry x="0" relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- =============================================================== -->
+        <!-- LEGEND                                                          -->
+        <!-- =============================================================== -->
+        <mxCell id="legend" value="&lt;b&gt;Legend&lt;/b&gt;&lt;hr size=&quot;1&quot;&gt;&amp;mdash;&amp;mdash;&amp;rarr;  uses / association&lt;br&gt;- - -&amp;rarr;  dependency&lt;br&gt;&amp;loz;&amp;mdash;&amp;mdash;  composition" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;align=left;verticalAlign=top;spacingLeft=8;spacingRight=8;fontSize=11" vertex="1" parent="1">
+          <mxGeometry x="60" y="430" width="240" height="120" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

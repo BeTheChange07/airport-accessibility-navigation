@@ -15,3 +15,7 @@
 local.properties
 *.env
 RUNNING.md
+
+# Tooling caches / session data
+.idea/
+android-app/.idea/
