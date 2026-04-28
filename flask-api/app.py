@@ -35,6 +35,56 @@ def exitHandler():
 
 atexit.register(exitHandler)
 
+
+def _reopen_db_connection():
+    """Replace the module-level connection + cursor with a fresh pair.
+
+    Called when the existing connection has been closed by the server (AWS
+    RDS idle timeout, network blip, etc.). Endpoints look up `cur` /
+    `databaseConnection` via Python's module globals at call time, so
+    rebinding here makes every subsequent request use the new connection
+    without changing any of the route handlers.
+    """
+    global databaseConnection, cur
+    try:
+        databaseConnection.close()
+    except Exception:
+        pass
+    databaseConnection = psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor)
+    cur = databaseConnection.cursor()
+
+
+@app.before_request
+def _ensure_db_alive():
+    """Probe the DB connection before every request; reconnect if dead.
+
+    The original code opened a single global connection at import time and
+    never reopened it, so an RDS idle-timeout disconnect (or any transient
+    network failure) would leave every subsequent request 500'ing with
+    `psycopg2.InterfaceError: connection already closed` until Flask was
+    restarted. The probe is a `SELECT 1` on a short-lived cursor — cheap
+    enough to run on every request, and it both detects a closed connection
+    and clears any "current transaction is aborted" state from a prior
+    failed query.
+    """
+    global databaseConnection
+    try:
+        if databaseConnection.closed != 0:
+            raise psycopg2.InterfaceError("connection marked closed")
+        with databaseConnection.cursor() as probe:
+            probe.execute("SELECT 1")
+            probe.fetchone()
+    except (psycopg2.InterfaceError, psycopg2.OperationalError):
+        _reopen_db_connection()
+    except psycopg2.Error:
+        # Some other DB error (e.g., InFailedSqlTransaction) — rollback so
+        # the connection becomes usable again rather than wedging on every
+        # subsequent request.
+        try:
+            databaseConnection.rollback()
+        except Exception:
+            _reopen_db_connection()
+
 def calculate_bearing(lat1, lng1, lat2, lng2):
     """Calculate bearing in degrees from north between two lat/lng points."""
     lat1_r, lat2_r = math.radians(lat1), math.radians(lat2)
