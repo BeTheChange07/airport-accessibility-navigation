@@ -3,11 +3,18 @@
 import os
 import math
 import socket
+import functools
+import secrets
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, send_from_directory, render_template_string, redirect
+from flask import (
+    Flask, jsonify, request, send_from_directory, render_template_string,
+    redirect, g,
+)
 from flask_cors import CORS
+import bcrypt
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, Json
 
 import atexit
 from NearestNodeFinder import NearestNodeFinder
@@ -213,11 +220,16 @@ def health():
 
 def routeHelperFunctionInQueryDijkstraReplacement(fromNode: int, toNode: int) -> list[dict[str, Any]]:
     # TODO: replace pgr_dijkstra with A*.
+    # UC8: skip edges and nodes the admin has marked closed. The inner SQL
+    # is the literal string pgr_dijkstra runs as its graph definition --
+    # joining nav_edges to nav_nodes on both endpoints lets us drop edges
+    # whose source / target was painted closed. COALESCE(.., false) keeps
+    # this safe against rows that pre-date the iteration_3 migration.
     cur.execute("""
         SELECT
             r.node
         FROM pgr_dijkstra(
-            'SELECT id, from_node AS source, to_node AS target, distance AS cost, distance AS reverse_cost FROM nav_edges',
+            'SELECT e.id, e.from_node AS source, e.to_node AS target, e.distance AS cost, e.distance AS reverse_cost FROM nav_edges e JOIN nav_nodes nf ON nf.id = e.from_node JOIN nav_nodes nt ON nt.id = e.to_node WHERE COALESCE(e.is_closed, false) = false AND COALESCE(nf.is_closed, false) = false AND COALESCE(nt.is_closed, false) = false',
             %s, %s,
             directed => false
         ) AS r
@@ -368,16 +380,20 @@ def nearest_node():
         cache_key = zone_param if zone_param else '__all__'
 
         if cache_key not in nearest_node.finders:
+            # UC8: exclude admin-painted closed nodes so we don't snap the
+            # user onto a node that's about to be unrouteable.
             if zone_param:
                 cur.execute("""
                     SELECT DISTINCT n.id, n.lat, n.lng FROM nav_nodes n
                     WHERE EXISTS (SELECT 1 FROM nav_edges e WHERE e.from_node = n.id OR e.to_node = n.id)
                       AND COALESCE(n.zone, 'public') = %s
+                      AND COALESCE(n.is_closed, false) = false
                 """, (zone_param,))
             else:
                 cur.execute("""
                     SELECT DISTINCT n.id, n.lat, n.lng FROM nav_nodes n
                     WHERE EXISTS (SELECT 1 FROM nav_edges e WHERE e.from_node = n.id OR e.to_node = n.id)
+                      AND COALESCE(n.is_closed, false) = false
                 """)
             nodes = cur.fetchall()
             if not nodes:
@@ -437,8 +453,12 @@ def get_nodes():
         
     try:
         where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        # is_closed exposed for the admin map (UC8); default-false for any
+        # caller that pre-dates the iteration_3 migration.
         cur.execute(f"""
-            SELECT id, lat AS latitude, lng AS longitude, label, node_type
+            SELECT id, lat AS latitude, lng AS longitude, label, node_type,
+                   COALESCE(is_closed, false) AS is_closed,
+                   closed_reason, closed_effective_from
             FROM nav_nodes
             {where_clause}
             ORDER BY label
@@ -457,8 +477,12 @@ def get_edges():
     """Return all nav_edges for visualization."""
     try:
         c = databaseConnection.cursor()
+        # is_closed surfaced so the admin map can paint closed edges red
+        # (UC8). Default-false for older rows.
         c.execute("""
             SELECT e.id, e.from_node, e.to_node, e.distance, e.direction,
+                   COALESCE(e.is_closed, false) AS is_closed,
+                   e.closed_reason, e.closed_effective_from,
                    n1.lat AS from_lat, n1.lng AS from_lng,
                    n2.lat AS to_lat, n2.lng AS to_lng
             FROM nav_edges e
@@ -771,10 +795,109 @@ def admin_amenities_page():
 
 @app.route('/admin/nav-editor')
 def admin_nav_editor():
-    """Serve the existing affine-transform nav editor from repo root, unmodified."""
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-    path = os.path.join(repo_root, 'nav_editor (1).html')
+    """Serve the affine-transform nav editor from flask-api/templates/."""
+    path = os.path.join(os.path.dirname(__file__), 'templates', 'nav_editor.html')
     return _serve_html(path, inject_maps_key=True)
+
+
+@app.route('/admin/map')
+def admin_map_page():
+    """UC8 + UC7 admin surface: Google Maps basemap, node/edge paint mode,
+    amenity click-to-toggle, and (UC3) reports list.
+    """
+    path = os.path.join(os.path.dirname(__file__), 'templates', 'admin_map.html')
+    return _serve_html(path, inject_maps_key=True)
+
+
+# UC8 paint endpoints. Production would gate these behind an admin role;
+# for the prototype they reuse the unauthenticated admin surface pattern
+# established by the Iteration 2 amenity status endpoints above.
+
+def _paint_graph_elements(table: str, body: dict) -> tuple:
+    """Shared bulk-paint helper for nav_nodes / nav_edges.
+
+    Returns ``(json_payload, http_status)``. Validates the request body,
+    runs the UPDATE in a fresh cursor, and stamps closed_effective_from /
+    closed_reason atomically so rows never end up with a "closed but no
+    timestamp" combination.
+    """
+    if table not in ('nav_nodes', 'nav_edges'):
+        return {'error': 'invalid table'}, 500
+
+    ids = body.get('ids')
+    is_closed = body.get('is_closed')
+    reason = body.get('reason')
+
+    if not isinstance(ids, list) or len(ids) == 0:
+        return {'error': 'ids must be a non-empty list of integer ids'}, 400
+    if not all(isinstance(i, int) for i in ids):
+        return {'error': 'ids must be a list of integers'}, 400
+    if not isinstance(is_closed, bool):
+        return {'error': 'is_closed must be true or false'}, 400
+
+    try:
+        c = databaseConnection.cursor()
+        # When painting open we explicitly clear the reason / timestamp so
+        # the row reads cleanly; when painting closed we stamp NOW() so
+        # downstream tooling can see when the closure landed.
+        c.execute(f"""
+            UPDATE {table}
+            SET is_closed = %s,
+                closed_reason = CASE WHEN %s THEN %s ELSE NULL END,
+                closed_effective_from = CASE WHEN %s THEN NOW() ELSE NULL END
+            WHERE id = ANY(%s::int[])
+            RETURNING id, is_closed, closed_reason, closed_effective_from
+        """, (is_closed, is_closed, reason, is_closed, ids))
+        rows = c.fetchall()
+        databaseConnection.commit()
+        c.close()
+        return {'updated': len(rows), 'rows': list(rows)}, 200
+    except Exception as e:
+        databaseConnection.rollback()
+        return {'error': str(e)}, 500
+
+
+@app.route('/api/admin/nav/nodes/status', methods=['POST'])
+def admin_paint_nodes_status():
+    """UC8: bulk paint nav_nodes open or closed.
+
+    Body: {"ids": [int, ...], "is_closed": bool, "reason": str?}
+    """
+    body = request.get_json(silent=True) or {}
+    payload, status = _paint_graph_elements('nav_nodes', body)
+    return jsonify(payload), status
+
+
+@app.route('/api/admin/nav/edges/status', methods=['POST'])
+def admin_paint_edges_status():
+    """UC8: bulk paint nav_edges open or closed."""
+    body = request.get_json(silent=True) or {}
+    payload, status = _paint_graph_elements('nav_edges', body)
+    return jsonify(payload), status
+
+
+def _apply_amenity_status_change(amenity_id: int, new_status: str):
+    """UC7 helper: bump an amenity's status and stamp lastupdated.
+
+    Returns the updated row (RealDictCursor row) or ``None`` if the amenity
+    doesn't exist or the status is rejected. Caller is responsible for
+    commit/rollback; centralising the SQL here lets UC3's submit handler
+    reuse the exact same write when a report category implies an OOS flip,
+    so the two paths can never drift apart.
+    """
+    if new_status not in ADMIN_ALLOWED_STATUSES:
+        return None
+    c = databaseConnection.cursor()
+    c.execute("""
+        UPDATE amenities
+        SET status = %s,
+            lastupdated = NOW()
+        WHERE id = %s
+        RETURNING id, name, type, status, occupancy, crowdlevel, lastupdated
+    """, (new_status, amenity_id))
+    row = c.fetchone()
+    c.close()
+    return row
 
 
 @app.route('/api/admin/amenity/<int:amenity_id>/status', methods=['POST'])
@@ -788,17 +911,8 @@ def admin_update_amenity_status(amenity_id):
         }), 400
 
     try:
-        c = databaseConnection.cursor()
-        c.execute("""
-            UPDATE amenities
-            SET status = %s,
-                lastupdated = NOW()
-            WHERE id = %s
-            RETURNING id, name, type, status, occupancy, crowdlevel, lastupdated
-        """, (new_status, amenity_id))
-        row = c.fetchone()
+        row = _apply_amenity_status_change(amenity_id, new_status)
         databaseConnection.commit()
-        c.close()
         if not row:
             return jsonify({'error': f'Amenity {amenity_id} not found'}), 404
         return jsonify(row)
@@ -879,6 +993,470 @@ def admin_force_amenity_occupancy(amenity_id):
         databaseConnection.commit()
         c.close()
         return jsonify(row)
+    except Exception as e:
+        databaseConnection.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Auth (UC4 — Manage Account)
+#
+# Simple opaque-token model: random hex token, 7-day expiration, no refresh.
+# Logout deletes the token row. Locked decision per the iteration plan; do
+# not bolt on roles or refresh tokens here.
+# ---------------------------------------------------------------------------
+
+AUTH_TOKEN_TTL_DAYS = 7
+USERNAME_MAX_LEN = 64
+PASSWORD_MIN_LEN = 6
+
+
+def _hash_password(plain: str) -> str:
+    """bcrypt-hash a plaintext password. Returns the encoded hash string."""
+    return bcrypt.hashpw(plain.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+
+def _verify_password(plain: str, hashed: str) -> bool:
+    """Constant-time bcrypt verify. Returns False on any malformed input."""
+    if not isinstance(hashed, str) or not isinstance(plain, str):
+        return False
+    try:
+        return bcrypt.checkpw(plain.encode('utf-8'), hashed.encode('utf-8'))
+    except (ValueError, TypeError):
+        return False
+
+
+def _new_auth_token():
+    """Return a fresh ``(token, expires_at)`` pair."""
+    token = secrets.token_hex(32)
+    expires = datetime.now(timezone.utc) + timedelta(days=AUTH_TOKEN_TTL_DAYS)
+    return token, expires
+
+
+def _serialize_user(row):
+    """Pick the public-safe subset of a users row for API responses."""
+    if row is None:
+        return None
+    return {
+        'id': row['id'],
+        'username': row['username'],
+        'name': row.get('name'),
+        'accessibility_prefs': row.get('accessibility_prefs') or {},
+        'filters': row.get('filters') or {},
+        'profile': row.get('profile') or {},
+        'created_at': row.get('created_at').isoformat()
+            if row.get('created_at') and hasattr(row['created_at'], 'isoformat')
+            else row.get('created_at'),
+    }
+
+
+def _current_user_optional():
+    """Resolve the bearer token to a user row, or return None.
+
+    Used both directly (for endpoints where auth is optional, e.g. UC3
+    submit) and via ``_auth_required`` for the protected endpoints.
+    """
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return None
+    token = auth_header[len('Bearer '):].strip()
+    if not token:
+        return None
+    try:
+        c = databaseConnection.cursor()
+        c.execute("""
+            SELECT u.id, u.username, u.name,
+                   u.accessibility_prefs, u.filters, u.profile,
+                   u.created_at
+            FROM auth_tokens t
+            JOIN users u ON u.id = t.user_id
+            WHERE t.token = %s
+              AND t.expires_at > NOW()
+            LIMIT 1
+        """, (token,))
+        row = c.fetchone()
+        c.close()
+        return row
+    except Exception:
+        databaseConnection.rollback()
+        return None
+
+
+def _auth_required(view):
+    """Decorator: 401 unless ``Authorization: Bearer <token>`` resolves."""
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        user = _current_user_optional()
+        if not user:
+            return jsonify({'error': 'authentication required'}), 401
+        g.current_user = user
+        return view(*args, **kwargs)
+    return wrapped
+
+
+@app.route('/api/auth/register', methods=['POST'])
+def auth_register():
+    """UC4: create a new user and return an auth token.
+
+    Body: {"username": str, "password": str, "name"?: str,
+           "accessibility_prefs"?: object, "filters"?: object,
+           "profile"?: object}
+    """
+    body = request.get_json(silent=True) or {}
+    username = body.get('username')
+    password = body.get('password')
+    name = body.get('name')
+    prefs = body.get('accessibility_prefs') or {}
+    filters = body.get('filters') or {}
+    profile = body.get('profile') or {}
+
+    if not isinstance(username, str) or not (0 < len(username.strip()) <= USERNAME_MAX_LEN):
+        return jsonify({'error': f'username must be 1..{USERNAME_MAX_LEN} chars'}), 400
+    if not isinstance(password, str) or len(password) < PASSWORD_MIN_LEN:
+        return jsonify({'error': f'password must be at least {PASSWORD_MIN_LEN} chars'}), 400
+    for label, value in (('accessibility_prefs', prefs), ('filters', filters), ('profile', profile)):
+        if not isinstance(value, dict):
+            return jsonify({'error': f'{label} must be a JSON object'}), 400
+
+    username = username.strip()
+    try:
+        c = databaseConnection.cursor()
+        c.execute("SELECT 1 FROM users WHERE username = %s", (username,))
+        if c.fetchone():
+            c.close()
+            return jsonify({'error': 'username already taken'}), 409
+
+        c.execute("""
+            INSERT INTO users (username, password_hash, name,
+                               accessibility_prefs, filters, profile)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id, username, name, accessibility_prefs, filters, profile,
+                      created_at
+        """, (
+            username, _hash_password(password), name,
+            Json(prefs), Json(filters), Json(profile),
+        ))
+        user = c.fetchone()
+
+        token, expires = _new_auth_token()
+        c.execute(
+            "INSERT INTO auth_tokens (token, user_id, expires_at) VALUES (%s, %s, %s)",
+            (token, user['id'], expires),
+        )
+        databaseConnection.commit()
+        c.close()
+        return jsonify({
+            'token': token,
+            'expires_at': expires.isoformat(),
+            'user': _serialize_user(user),
+        }), 201
+    except Exception as e:
+        databaseConnection.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/auth/login', methods=['POST'])
+def auth_login():
+    """UC4: verify credentials and issue a bearer token."""
+    body = request.get_json(silent=True) or {}
+    username = body.get('username')
+    password = body.get('password')
+    if not isinstance(username, str) or not isinstance(password, str):
+        return jsonify({'error': 'username and password are required'}), 400
+
+    try:
+        c = databaseConnection.cursor()
+        c.execute("""
+            SELECT id, username, password_hash, name,
+                   accessibility_prefs, filters, profile, created_at
+            FROM users
+            WHERE username = %s
+        """, (username.strip(),))
+        user = c.fetchone()
+        # Verify even when user is None to keep timing roughly equal.
+        ok = _verify_password(password, user['password_hash']) if user else False
+        if not user or not ok:
+            c.close()
+            return jsonify({'error': 'invalid username or password'}), 401
+
+        token, expires = _new_auth_token()
+        c.execute(
+            "INSERT INTO auth_tokens (token, user_id, expires_at) VALUES (%s, %s, %s)",
+            (token, user['id'], expires),
+        )
+        databaseConnection.commit()
+        c.close()
+        return jsonify({
+            'token': token,
+            'expires_at': expires.isoformat(),
+            'user': _serialize_user(user),
+        })
+    except Exception as e:
+        databaseConnection.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/auth/logout', methods=['POST'])
+@_auth_required
+def auth_logout():
+    """UC4: delete the bearer token used on this request."""
+    auth_header = request.headers.get('Authorization', '')
+    token = auth_header[len('Bearer '):].strip() if auth_header.startswith('Bearer ') else ''
+    try:
+        c = databaseConnection.cursor()
+        c.execute("DELETE FROM auth_tokens WHERE token = %s", (token,))
+        databaseConnection.commit()
+        c.close()
+        return jsonify({'status': 'logged_out'})
+    except Exception as e:
+        databaseConnection.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/me', methods=['GET'])
+@_auth_required
+def me_get():
+    """UC4: return the current user."""
+    return jsonify({'user': _serialize_user(g.current_user)})
+
+
+@app.route('/api/me', methods=['PUT'])
+@_auth_required
+def me_update():
+    """UC4: partial update of name / accessibility_prefs / filters / profile."""
+    body = request.get_json(silent=True) or {}
+    user_id = g.current_user['id']
+
+    sets = []
+    params = []
+    if 'name' in body:
+        if body['name'] is not None and not isinstance(body['name'], str):
+            return jsonify({'error': 'name must be a string or null'}), 400
+        sets.append("name = %s")
+        params.append(body['name'])
+    for key in ('accessibility_prefs', 'filters', 'profile'):
+        if key in body:
+            if not isinstance(body[key], dict):
+                return jsonify({'error': f'{key} must be a JSON object'}), 400
+            sets.append(f"{key} = %s")
+            params.append(Json(body[key]))
+
+    if not sets:
+        return jsonify({'error': 'no updatable fields supplied'}), 400
+
+    params.append(user_id)
+    try:
+        c = databaseConnection.cursor()
+        c.execute(f"""
+            UPDATE users
+            SET {", ".join(sets)}
+            WHERE id = %s
+            RETURNING id, username, name, accessibility_prefs, filters, profile,
+                      created_at
+        """, params)
+        user = c.fetchone()
+        databaseConnection.commit()
+        c.close()
+        return jsonify({'user': _serialize_user(user)})
+    except Exception as e:
+        databaseConnection.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/me', methods=['DELETE'])
+@_auth_required
+def me_delete():
+    """UC4: delete the current user. ON DELETE CASCADE clears auth_tokens."""
+    user_id = g.current_user['id']
+    try:
+        c = databaseConnection.cursor()
+        c.execute("DELETE FROM users WHERE id = %s", (user_id,))
+        databaseConnection.commit()
+        c.close()
+        return jsonify({'status': 'deleted'})
+    except Exception as e:
+        databaseConnection.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# UC3 — Submit User Report
+#
+# Report submission is auth-OPTIONAL: a guest can flag a broken restroom
+# without signing in. list-mine requires auth; the admin list lives behind
+# the unauthenticated admin surface (same pattern as UC7 for the prototype).
+# ---------------------------------------------------------------------------
+
+REPORT_ALLOWED_STATUSES = ('pending', 'in_progress', 'resolved', 'dismissed')
+REPORT_ALLOWED_CATEGORIES = (
+    'out_of_order', 'cleanliness', 'accessibility', 'wait_time', 'other',
+)
+# Categories that mean "this thing is broken right now". Submitting one of
+# these flips the amenity to out_of_service via the existing UC7 path so
+# routing stops sending users there. Kept tight on purpose: a "wait_time"
+# report is loud user feedback, not a closure trigger.
+REPORT_CATEGORIES_TRIGGER_OOS = {'out_of_order'}
+
+REPORT_SUBMIT_THROTTLE_SECONDS = 60
+# Per-process in-memory throttle, keyed by user_id (preferred) or IP.
+# Process-local is fine for the prototype; production would push this into
+# Redis so a horizontally-scaled deploy still rate-limits correctly.
+_report_submit_last_seen: "dict[str, datetime]" = {}
+
+
+@app.route('/api/reports', methods=['POST'])
+def submit_report():
+    """UC3: submit a new user report.
+
+    Body: {amenity_id (int, required), category (req, in
+    REPORT_ALLOWED_CATEGORIES), description?, rating? (1..5)}.
+    """
+    body = request.get_json(silent=True) or {}
+    amenity_id = body.get('amenity_id')
+    category = body.get('category')
+    description = body.get('description')
+    rating = body.get('rating')
+
+    if not isinstance(amenity_id, int):
+        return jsonify({'error': 'amenity_id (int) is required'}), 400
+    if not isinstance(category, str) or category not in REPORT_ALLOWED_CATEGORIES:
+        return jsonify({
+            'error': f'category must be one of {list(REPORT_ALLOWED_CATEGORIES)}'
+        }), 400
+    if description is not None and not isinstance(description, str):
+        return jsonify({'error': 'description must be a string or null'}), 400
+    if rating is not None and (not isinstance(rating, int) or not 1 <= rating <= 5):
+        return jsonify({'error': 'rating must be an integer 1..5'}), 400
+
+    user = _current_user_optional()
+    user_id = user['id'] if user else None
+    submitter_ip = request.remote_addr or ''
+
+    # Rate-limit: prefer user_id (logged-in), fall back to IP for guests.
+    rate_key = f"u:{user_id}" if user_id else f"ip:{submitter_ip}"
+    now = datetime.now(timezone.utc)
+    last = _report_submit_last_seen.get(rate_key)
+    if last is not None:
+        elapsed = (now - last).total_seconds()
+        if elapsed < REPORT_SUBMIT_THROTTLE_SECONDS:
+            return jsonify({
+                'error': 'Too many submissions. Please wait before reporting again.',
+                'retry_after_seconds': int(REPORT_SUBMIT_THROTTLE_SECONDS - elapsed),
+            }), 429
+    _report_submit_last_seen[rate_key] = now
+
+    try:
+        c = databaseConnection.cursor()
+        c.execute("""
+            INSERT INTO user_reports
+                (amenity_id, user_id, category, description, rating, submitter_ip)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id, amenity_id, user_id, category, description, rating,
+                      status, created_at, resolved_at
+        """, (amenity_id, user_id, category, description, rating, submitter_ip))
+        report = c.fetchone()
+        databaseConnection.commit()
+        c.close()
+
+        # Category-driven UC7 flip. Best-effort: if the amenity update fails
+        # we don't unwind the report -- the report still represents real
+        # user feedback even if the status transition didn't take.
+        if category in REPORT_CATEGORIES_TRIGGER_OOS:
+            try:
+                _apply_amenity_status_change(amenity_id, 'out_of_service')
+                databaseConnection.commit()
+            except Exception:
+                databaseConnection.rollback()
+
+        return jsonify({'report': dict(report)}), 201
+    except Exception as e:
+        databaseConnection.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/reports/mine', methods=['GET'])
+@_auth_required
+def list_my_reports():
+    """UC3: list the current user's reports, newest first."""
+    user_id = g.current_user['id']
+    try:
+        c = databaseConnection.cursor()
+        c.execute("""
+            SELECT r.id, r.amenity_id,
+                   a.name AS amenity_name, a.type AS amenity_type,
+                   r.category, r.description, r.rating, r.status,
+                   r.created_at, r.resolved_at
+            FROM user_reports r
+            LEFT JOIN amenities a ON a.id = r.amenity_id
+            WHERE r.user_id = %s
+            ORDER BY r.created_at DESC
+        """, (user_id,))
+        rows = c.fetchall()
+        c.close()
+        return jsonify({'reports': list(rows)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/admin/reports', methods=['GET'])
+def admin_list_reports():
+    """UC3 admin: list every report for the admin map panel.
+
+    Same unauthenticated admin pattern as the existing UC7 endpoints.
+    Production would gate behind an admin role.
+    """
+    try:
+        c = databaseConnection.cursor()
+        c.execute("""
+            SELECT r.id, r.amenity_id,
+                   a.name AS amenity_name, a.type AS amenity_type,
+                   r.user_id, u.username,
+                   r.category, r.description, r.rating, r.status,
+                   r.created_at, r.resolved_at
+            FROM user_reports r
+            LEFT JOIN amenities a ON a.id = r.amenity_id
+            LEFT JOIN users     u ON u.id = r.user_id
+            ORDER BY
+                CASE r.status
+                    WHEN 'pending'     THEN 0
+                    WHEN 'in_progress' THEN 1
+                    ELSE 2
+                END,
+                r.created_at DESC
+        """)
+        rows = c.fetchall()
+        c.close()
+        return jsonify({'reports': list(rows)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/admin/reports/<int:report_id>/status', methods=['POST'])
+def admin_update_report_status(report_id):
+    """UC3 admin: change a report's status. Stamps resolved_at on resolve/dismiss."""
+    body = request.get_json(silent=True) or {}
+    new_status = body.get('status')
+    if new_status not in REPORT_ALLOWED_STATUSES:
+        return jsonify({
+            'error': f'status must be one of {list(REPORT_ALLOWED_STATUSES)}'
+        }), 400
+    try:
+        c = databaseConnection.cursor()
+        c.execute("""
+            UPDATE user_reports
+            SET status = %s,
+                resolved_at = CASE WHEN %s IN ('resolved', 'dismissed')
+                                   THEN NOW() ELSE NULL END
+            WHERE id = %s
+            RETURNING id, amenity_id, user_id, category, description, rating,
+                      status, created_at, resolved_at
+        """, (new_status, new_status, report_id))
+        row = c.fetchone()
+        databaseConnection.commit()
+        c.close()
+        if not row:
+            return jsonify({'error': f'report {report_id} not found'}), 404
+        return jsonify({'report': dict(row)})
     except Exception as e:
         databaseConnection.rollback()
         return jsonify({'error': str(e)}), 500

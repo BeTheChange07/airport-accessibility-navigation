@@ -57,6 +57,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 val viewModel: NavigationViewModel = viewModel()
+                val authViewModel: AuthViewModel = viewModel()
+                val reportsViewModel: ReportsViewModel = viewModel()
                 latestViewModel = viewModel
 
                 LaunchedEffect(Unit) {
@@ -79,7 +81,11 @@ class MainActivity : ComponentActivity() {
                     viewModel.loadAmenities()
                 }
 
-                NavigationScreen(viewModel = viewModel)
+                NavigationScreen(
+                    viewModel = viewModel,
+                    authViewModel = authViewModel,
+                    reportsViewModel = reportsViewModel,
+                )
             }
         }
     }
@@ -118,8 +124,20 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun NavigationScreen(viewModel: NavigationViewModel) {
+fun NavigationScreen(
+    viewModel: NavigationViewModel,
+    authViewModel: AuthViewModel,
+    reportsViewModel: ReportsViewModel,
+) {
     val state by viewModel.state.collectAsState()
+    val authState by authViewModel.state.collectAsState()
+    var showAccountSheet by remember { mutableStateOf(false) }
+    // Reports sheet state. When non-null with prefilled = an Amenity, the
+    // form is pre-locked to that amenity (entry point: amenity detail).
+    // When non-null with prefilled = null, the user came from the Account
+    // sheet's "My reports" button.
+    var showReportsSheet by remember { mutableStateOf(false) }
+    var reportPrefillAmenity by remember { mutableStateOf<Amenity?>(null) }
 
     val terminalD = LatLng(32.8980, -97.0435)
     val cameraPositionState = rememberCameraPositionState {
@@ -305,6 +323,11 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                     viewModel.routeToSpecificAmenity(amenity)
                     viewModel.clearSelectedAmenity()
                 },
+                onReport = {
+                    reportPrefillAmenity = amenity
+                    showReportsSheet = true
+                    viewModel.clearSelectedAmenity()
+                },
                 onClose = { viewModel.clearSelectedAmenity() }
             )
         }
@@ -405,6 +428,70 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
             )
         }
 
+        // UC4: account chip — top-end. Hidden during navigation so it doesn't
+        // overlap the HUD card. Tap opens LoginScreen or AccountSettingsScreen
+        // depending on whether the user is signed in.
+        if (!state.isNavigating && !state.isSimulating) {
+            Card(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(12.dp)
+                    .clickable { showAccountSheet = true },
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Text(
+                    text = if (authState.user != null)
+                        "👤 ${authState.user!!.username}" else "👤 Sign in",
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+
+        if (showAccountSheet) {
+            if (authState.user == null) {
+                LoginScreen(
+                    authViewModel = authViewModel,
+                    onClose = { showAccountSheet = false }
+                )
+            } else {
+                AccountSettingsScreen(
+                    authViewModel = authViewModel,
+                    onClose = { showAccountSheet = false },
+                    onShowReports = {
+                        showAccountSheet = false
+                        reportPrefillAmenity = null
+                        showReportsSheet = true
+                    },
+                    // Mirror the main map's Filters toggle so editing prefs
+                    // here applies to the map immediately AND syncs to the
+                    // backend, instead of just reading as static text.
+                    accessibilityModeOn = state.accessibilityMode,
+                    onAccessibilityToggle = { newValue ->
+                        if (state.accessibilityMode != newValue) {
+                            viewModel.toggleAccessibilityMode()
+                        }
+                        authViewModel.persistWheelchairPref(newValue)
+                    },
+                )
+            }
+        }
+
+        if (showReportsSheet) {
+            ReportsScreen(
+                reportsViewModel = reportsViewModel,
+                isLoggedIn = authState.user != null,
+                amenities = state.amenities,
+                prefilledAmenity = reportPrefillAmenity,
+                onClose = {
+                    showReportsSheet = false
+                    reportPrefillAmenity = null
+                    reportsViewModel.clearMessages()
+                }
+            )
+        }
+
         // Bottom control panel
         Card(
             modifier = Modifier
@@ -440,7 +527,15 @@ fun NavigationScreen(viewModel: NavigationViewModel) {
                     )
 
                     if (state.currentZone != null) {
-                        FiltersSection(state = state, viewModel = viewModel)
+                        FiltersSection(
+                            state = state,
+                            viewModel = viewModel,
+                            onAccessibilityToggle = { newValue ->
+                                viewModel.toggleAccessibilityMode()
+                                // Best-effort backend persist; no-op when guest.
+                                authViewModel.persistWheelchairPref(newValue)
+                            }
+                        )
                         Spacer(modifier = Modifier.height(8.dp))
 
                         // Amenity type dropdown (filters the map to a single type)
@@ -649,7 +744,11 @@ fun AmenityDropdown(
 
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-fun FiltersSection(state: NavigationState, viewModel: NavigationViewModel) {
+fun FiltersSection(
+    state: NavigationState,
+    viewModel: NavigationViewModel,
+    onAccessibilityToggle: (Boolean) -> Unit = { viewModel.toggleAccessibilityMode() }
+) {
     var expanded by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -684,7 +783,7 @@ fun FiltersSection(state: NavigationState, viewModel: NavigationViewModel) {
             ) {
                 Switch(
                     checked = state.accessibilityMode,
-                    onCheckedChange = { viewModel.toggleAccessibilityMode() }
+                    onCheckedChange = { onAccessibilityToggle(it) }
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Wheelchair accessible only", fontSize = 14.sp)
@@ -762,7 +861,12 @@ internal fun crowdBucketLabel(level: Int): String = when {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AmenityDetailSheet(amenity: Amenity, onRouteHere: () -> Unit, onClose: () -> Unit) {
+fun AmenityDetailSheet(
+    amenity: Amenity,
+    onRouteHere: () -> Unit,
+    onReport: () -> Unit,
+    onClose: () -> Unit
+) {
     val isAccessible = amenity.has_accessible_unit == true ||
         amenity.wheelchairaccessible.equals("yes", ignoreCase = true)
     val isRestroom = amenity.type == "restroom"
@@ -811,6 +915,12 @@ fun AmenityDetailSheet(amenity: Amenity, onRouteHere: () -> Unit, onClose: () ->
                     modifier = Modifier.weight(1f)
                 ) { Text("Close") }
             }
+            Spacer(modifier = Modifier.height(8.dp))
+            // UC3 entry point: pre-fills the report form with this amenity.
+            OutlinedButton(
+                onClick = onReport,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Report a problem") }
             Spacer(modifier = Modifier.height(16.dp))
         }
     }

@@ -34,6 +34,21 @@ sys.modules.setdefault("NearestNodeFinder", _fake_nnf_module)
 import psycopg2  # noqa: E402
 
 
+class _ProbeCursor:
+    """No-op stand-in for the liveness-probe cursor in app.py.
+
+    `_ensure_db_alive` opens a ``with conn.cursor() as probe`` block,
+    runs SELECT 1, and fetches one row before the route handler runs.
+    Returning the shared singleton from ``__enter__`` would consume the
+    fetchone queue the test queued for the handler, so we hand back this
+    isolated stub instead.
+    """
+    def execute(self, sql, params=None): pass
+    def fetchone(self): return None
+    def fetchall(self): return []
+    def close(self): pass
+
+
 class FakeCursor:
     """Cursor with per-test queued fetchall/fetchone results."""
 
@@ -62,6 +77,15 @@ class FakeCursor:
     def close(self):
         pass
 
+    # Used only by the liveness probe; routes never wrap the singleton
+    # in `with`. Hand back a fresh stub so the probe's fetchone() doesn't
+    # eat a queued response meant for the handler.
+    def __enter__(self):
+        return _ProbeCursor()
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
     def queue_fetchall(self, rows):
         self._fetchall_queue.append(rows)
 
@@ -80,6 +104,10 @@ _fake_cursor_singleton = FakeCursor()
 
 
 class _FakeConn:
+    # psycopg2 exposes `closed` as an int (0 = open). The before_request
+    # liveness probe reads this attribute, so the stub must too.
+    closed = 0
+
     def cursor(self, *a, **k):
         return _fake_cursor_singleton
 
@@ -117,5 +145,9 @@ def _reset_state_between_tests():
     if hasattr(flask_app.nearest_node, "finders"):
         flask_app.nearest_node.finders = {}
         flask_app.nearest_node.node_ids_by_key = {}
+    # UC3 rate limit is process-local; clear so a previous test's submit
+    # doesn't 429 the next one when both use the same client IP.
+    if hasattr(flask_app, "_report_submit_last_seen"):
+        flask_app._report_submit_last_seen.clear()
     yield
     flask_app.cur.reset()

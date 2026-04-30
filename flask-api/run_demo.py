@@ -24,6 +24,15 @@ from dotenv import dotenv_values
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, ".."))
 MOCK_DIR = os.path.join(REPO_ROOT, "other mock apis")
+SQL_DIR = os.path.join(HERE, "SQL_FILES")
+
+# Iteration-3 SQL files applied at startup, in order. Every file must be
+# idempotent (IF NOT EXISTS / ON CONFLICT DO NOTHING) so re-launching the
+# demo against a partially-migrated RDS is safe.
+SCHEMA_FILES = [
+    "iteration3_schema.sql",
+    "iteration3_seed_demo.sql",
+]
 
 # Load flask-api/.env here and pass the resolved vars to every child. The
 # mock scripts live in a different directory and their own `load_dotenv()`
@@ -99,8 +108,60 @@ def _install_signal_handlers() -> None:
             pass
 
 
+def _apply_schema_migrations() -> None:
+    """Idempotently run the iteration-3 SQL files against RDS before launch.
+
+    Safe to re-run: each file is gated on IF NOT EXISTS / ON CONFLICT DO
+    NOTHING. If DB env vars are missing or the connection fails we log
+    and continue -- Flask itself will surface the underlying problem on
+    the first request rather than the launcher swallowing it silently.
+    """
+    db_kwargs = {
+        "host":     CHILD_ENV.get("DB_HOST"),
+        "port":     CHILD_ENV.get("DB_PORT", "5432"),
+        "dbname":   CHILD_ENV.get("DB_NAME"),
+        "user":     CHILD_ENV.get("DB_USER"),
+        "password": CHILD_ENV.get("DB_PASSWORD"),
+    }
+    if not db_kwargs["host"] or not db_kwargs["dbname"]:
+        print("[demo] DB env not set; skipping schema migration.", flush=True)
+        return
+
+    try:
+        import psycopg2  # type: ignore
+    except ImportError:
+        print("[demo] psycopg2 not installed; skipping schema migration.",
+              flush=True)
+        return
+
+    try:
+        conn = psycopg2.connect(**db_kwargs)
+    except Exception as e:
+        print(f"[demo] could not connect to RDS for migration: {e}",
+              flush=True)
+        return
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                for fname in SCHEMA_FILES:
+                    fpath = os.path.join(SQL_DIR, fname)
+                    if not os.path.exists(fpath):
+                        print(f"[demo] {fname} missing; skipping.", flush=True)
+                        continue
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        sql = f.read()
+                    cur.execute(sql)
+                    print(f"[demo] applied {fname}.", flush=True)
+    except Exception as e:
+        print(f"[demo] schema migration failed: {e}", flush=True)
+    finally:
+        conn.close()
+
+
 def main() -> int:
     _install_signal_handlers()
+    _apply_schema_migrations()
 
     python = sys.executable
 

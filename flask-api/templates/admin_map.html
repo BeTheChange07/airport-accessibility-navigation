@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Admin Map — Smart Amenities</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --panel-border: #334155;
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent-hover: #0ea5e9;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --orange: #f97316;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 1rem;
+    padding: .9rem 1.25rem;
+    border-bottom: 1px solid var(--panel-border);
+    background: var(--panel);
+    flex-shrink: 0;
+  }
+  header h1 { margin: 0; font-size: 1.1rem; font-weight: 600; }
+  header a { color: var(--accent); text-decoration: none; font-size: .85rem; }
+  header a:hover { text-decoration: underline; }
+  .layout { display: flex; flex: 1; min-height: 0; }
+  aside {
+    width: 300px; background: var(--panel);
+    border-right: 1px solid var(--panel-border);
+    overflow-y: auto; padding: 1rem; flex-shrink: 0;
+  }
+  aside h2 {
+    font-size: .72rem; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--text-muted); margin: 1.25rem 0 .5rem; font-weight: 600;
+  }
+  aside h2:first-of-type { margin-top: 0; }
+  #map { flex: 1; min-width: 0; }
+  button {
+    background: var(--accent); color: #0c1220;
+    border: none; border-radius: 6px; padding: .4rem .8rem;
+    font: inherit; font-weight: 500; cursor: pointer;
+  }
+  button:hover { background: var(--accent-hover); }
+  button.subtle {
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--panel-border);
+  }
+  button.subtle:hover { background: #334155; }
+  button.danger { background: var(--red); color: #fff; }
+  button.danger:hover { background: #dc2626; }
+  button.success { background: var(--green); color: #0c1220; }
+  button.toggle.on { background: var(--orange); color: #0c1220; }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-bottom: .5rem; }
+  .row label { font-size: .8rem; color: var(--text-muted); flex-shrink: 0; }
+  input[type="text"] {
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--panel-border); border-radius: 6px;
+    padding: .35rem .55rem; font: inherit; width: 100%;
+  }
+  .pill {
+    display: inline-block; padding: .12rem .5rem;
+    border-radius: 999px; font-size: .72rem;
+  }
+  .legend { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .25rem; }
+  .legend .swatch {
+    display: inline-flex; align-items: center; gap: .35rem;
+    font-size: .72rem; color: var(--text-muted);
+  }
+  .legend .dot {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  }
+  .reports-empty {
+    font-size: .8rem; color: var(--text-muted); margin: 0;
+  }
+  #reportsList { list-style: none; padding: 0; margin: 0; }
+  #reportsList li {
+    padding: .5rem; margin-bottom: .4rem;
+    background: var(--bg); border: 1px solid var(--panel-border);
+    border-radius: 6px; font-size: .82rem;
+  }
+  #reportsList .meta { color: var(--text-muted); font-size: .72rem; }
+  #reportsList .actions { display: flex; gap: .35rem; margin-top: .35rem; }
+  #toast {
+    position: fixed; bottom: 1rem; right: 1rem;
+    padding: .55rem 1rem; border-radius: 8px;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    color: var(--text); font-size: .9rem; max-width: 22rem;
+    opacity: 0; transform: translateY(.4rem);
+    transition: opacity .2s, transform .2s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; transform: none; }
+  #toast.err { border-color: var(--red); color: #fecaca; }
+  .help { font-size: .75rem; color: var(--text-muted); line-height: 1.4; margin: 0 0 .5rem; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Admin Map</h1>
+    <a href="/admin">← back to admin home</a>
+    <span style="margin-left:auto;font-size:.78rem;color:var(--text-muted)">UC8 · UC7 · UC3</span>
+  </header>
+
+  <div class="layout">
+    <aside>
+      <h2>Paint Mode</h2>
+      <p class="help">
+        Turn paint <b>ON</b>, pick a brush, then:<br>
+        • <b>Left click</b> a node or edge to apply to that one element.<br>
+        • <b>Left drag</b> to rectangle-select many nodes at once.<br>
+        • <b>Middle (scroll-wheel) click + drag</b> to pan the map.<br>
+        • <b>Scroll wheel</b> zooms.
+      </p>
+      <div class="row">
+        <button id="paintToggle" class="toggle subtle">Paint: OFF</button>
+      </div>
+      <div id="paintControls" hidden>
+        <div class="row">
+          <button data-brush="close" class="brush-btn danger">Close</button>
+          <button data-brush="open" class="brush-btn success">Open</button>
+        </div>
+        <div class="row">
+          <label for="reasonInput">Reason</label>
+        </div>
+        <div class="row">
+          <input id="reasonInput" type="text" placeholder="e.g. flooding, maintenance" />
+        </div>
+      </div>
+      <div class="legend">
+        <span class="swatch"><span class="dot" style="background:#22c55e"></span>open</span>
+        <span class="swatch"><span class="dot" style="background:#ef4444"></span>closed</span>
+        <span class="swatch"><span class="dot" style="background:#38bdf8"></span>node</span>
+      </div>
+
+      <h2>Amenities</h2>
+      <p class="help">Click an amenity marker to cycle its status (open → closed → open). Restroom occupancy still lives on the
+        <a href="/admin/amenities" style="color:var(--accent)">Manage Amenities</a> page.</p>
+
+      <h2>User Reports</h2>
+      <ul id="reportsList"><!-- populated from /api/admin/reports --></ul>
+      <p class="reports-empty" id="reportsEmpty">No user reports yet.</p>
+
+      <h2>Refresh</h2>
+      <div class="row">
+        <button id="refreshBtn" class="subtle">Reload graph &amp; amenities</button>
+      </div>
+    </aside>
+    <div id="map"></div>
+  </div>
+
+  <div id="toast"></div>
+
+<script>
+const TERMINAL_D = { lat: 32.8980, lng: -97.0435 };
+const STATUS_CYCLE = ['open', 'closed', 'busy', 'maintenance', 'out_of_service'];
+
+const REPORT_STATUSES = ['pending', 'in_progress', 'resolved', 'dismissed'];
+const REPORT_CATEGORY_LABELS = {
+  out_of_order: 'Out of order',
+  cleanliness: 'Cleanliness',
+  accessibility: 'Accessibility',
+  wait_time: 'Long wait',
+  other: 'Other',
+};
+
+let map;
+let nodes = [];
+let edges = [];
+let amenities = [];
+let reports = [];
+const nodeMarkers = new Map();
+const edgePolylines = new Map();
+const amenityMarkers = new Map();
+
+let paintOn = false;
+let brush = 'close';
+
+function toast(message, isError=false) {
+  const el = document.getElementById('toast');
+  el.textContent = message;
+  el.classList.toggle('err', !!isError);
+  el.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.remove('show'), 2400);
+}
+
+function colorForNode(n) {
+  return n.is_closed ? '#ef4444' : '#38bdf8';
+}
+function colorForEdge(e) {
+  return e.is_closed ? '#ef4444' : '#94a3b8';
+}
+function colorForAmenity(a) {
+  if (a.status === 'closed' || a.status === 'out_of_service') return '#ef4444';
+  if (a.status === 'maintenance') return '#f97316';
+  if (a.status === 'busy') return '#eab308';
+  return '#22c55e';
+}
+
+// Hidden OverlayView that exists only so we can borrow its projection
+// to convert lat/lng <-> container pixels for the drag-rectangle paint.
+let projOverlay = null;
+
+function initMap() {
+  map = new google.maps.Map(document.getElementById('map'), {
+    center: TERMINAL_D,
+    zoom: 18,
+    mapTypeId: 'roadmap',
+    disableDefaultUI: false,
+    clickableIcons: false,
+  });
+  projOverlay = new google.maps.OverlayView();
+  projOverlay.onAdd = () => {};
+  projOverlay.draw = () => {};
+  projOverlay.onRemove = () => {};
+  projOverlay.setMap(map);
+  setupDragSelectPaint();
+  loadAll();
+}
+
+// ---------------------------------------------------------------
+// Drag-rectangle paint mode.
+//
+// Google Maps eats single click+drag as map panning, so clicking
+// individual node markers works but a sweep across many nodes does
+// not. While paint mode is ON we disable map drag, listen for
+// mousedown/mousemove/mouseup on the map div, draw a translucent
+// selection rectangle, and on mouseup project every node's lat/lng
+// to container pixels and apply the brush to anything inside.
+//
+// A small drag (< 4px) falls through to the marker's normal click
+// handler so single-node clicks still work in paint mode.
+// ---------------------------------------------------------------
+let dragSelectStart = null;
+let dragSelectEl = null;
+// Middle-mouse-button pan tracker: holds the previous cursor position
+// while the wheel button is held so we can incrementally panBy().
+let middlePanLast = null;
+
+function setupDragSelectPaint() {
+  const mapDiv = document.getElementById('map');
+
+  mapDiv.addEventListener('mousedown', (e) => {
+    // Middle button (button === 1, the scroll-wheel click): pan the map.
+    // Works in any mode but is the only pan path while paint is ON.
+    if (e.button === 1) {
+      e.preventDefault();
+      middlePanLast = { x: e.clientX, y: e.clientY };
+      mapDiv.style.cursor = 'grabbing';
+      return;
+    }
+    // Left button + paint mode: start rectangle-select.
+    if (!paintOn || e.button !== 0) return;
+    const rect = mapDiv.getBoundingClientRect();
+    dragSelectStart = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    dragSelectEl = document.createElement('div');
+    dragSelectEl.style.cssText =
+      'position:absolute;border:2px dashed #38bdf8;' +
+      'background:rgba(56,189,248,0.15);pointer-events:none;z-index:5;' +
+      `left:${dragSelectStart.x}px;top:${dragSelectStart.y}px;width:0;height:0;`;
+    mapDiv.appendChild(dragSelectEl);
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  mapDiv.addEventListener('mousemove', (e) => {
+    // Middle-button pan in progress: feed delta into Google Maps panBy().
+    if (middlePanLast && map) {
+      const dx = e.clientX - middlePanLast.x;
+      const dy = e.clientY - middlePanLast.y;
+      // panBy moves the map's center, so to make the content follow the
+      // cursor we negate the delta.
+      map.panBy(-dx, -dy);
+      middlePanLast = { x: e.clientX, y: e.clientY };
+      return;
+    }
+    if (!paintOn || !dragSelectStart || !dragSelectEl) return;
+    const rect = mapDiv.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const left = Math.min(dragSelectStart.x, x);
+    const top  = Math.min(dragSelectStart.y, y);
+    dragSelectEl.style.left = left + 'px';
+    dragSelectEl.style.top  = top + 'px';
+    dragSelectEl.style.width  = Math.abs(x - dragSelectStart.x) + 'px';
+    dragSelectEl.style.height = Math.abs(y - dragSelectStart.y) + 'px';
+  });
+
+  mapDiv.addEventListener('mouseup', async (e) => {
+    if (e.button === 1) {
+      middlePanLast = null;
+      mapDiv.style.cursor = paintOn ? 'crosshair' : '';
+      return;
+    }
+    if (!paintOn || !dragSelectStart) return;
+    const rect = mapDiv.getBoundingClientRect();
+    const end = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    const start = dragSelectStart;
+    if (dragSelectEl) { dragSelectEl.remove(); dragSelectEl = null; }
+    dragSelectStart = null;
+
+    // Tiny drag = treat as a click; let the marker's own handler run.
+    if (Math.hypot(end.x - start.x, end.y - start.y) < 4) return;
+
+    const proj = projOverlay && projOverlay.getProjection();
+    if (!proj) { toast('Map projection not ready yet.', true); return; }
+
+    const minX = Math.min(start.x, end.x);
+    const maxX = Math.max(start.x, end.x);
+    const minY = Math.min(start.y, end.y);
+    const maxY = Math.max(start.y, end.y);
+
+    const ids = [];
+    for (const n of nodes) {
+      const px = proj.fromLatLngToContainerPixel(
+        new google.maps.LatLng(n.latitude, n.longitude)
+      );
+      if (!px) continue;
+      if (px.x >= minX && px.x <= maxX && px.y >= minY && px.y <= maxY) {
+        ids.push(n.id);
+      }
+    }
+    if (!ids.length) { toast('No nodes in selection.'); return; }
+    await paintGraph('nodes', ids);
+  });
+
+  // Cancel any in-flight drag/pan if the cursor leaves the map.
+  mapDiv.addEventListener('mouseleave', () => {
+    if (dragSelectEl) { dragSelectEl.remove(); dragSelectEl = null; }
+    dragSelectStart = null;
+    middlePanLast = null;
+    mapDiv.style.cursor = paintOn ? 'crosshair' : '';
+  });
+
+  // Browsers (Windows especially) open the auto-scroll cursor on middle
+  // click. preventDefault on auxclick suppresses it.
+  mapDiv.addEventListener('auxclick', (e) => {
+    if (e.button === 1) e.preventDefault();
+  });
+}
+
+async function loadAll() {
+  try {
+    const [n, e, a, r] = await Promise.all([
+      fetch('/api/nodes').then(r => r.json()),
+      fetch('/api/edges').then(r => r.json()),
+      fetch('/api/amenities').then(r => r.json()),
+      fetch('/api/admin/reports').then(r => r.json()).catch(() => ({ reports: [] })),
+    ]);
+    nodes = n.nodes || [];
+    edges = e.edges || [];
+    amenities = a.amenities || [];
+    reports = r.reports || [];
+    renderEdges();
+    renderNodes();
+    renderAmenities();
+    renderReports();
+  } catch (err) {
+    toast('Failed to load map data: ' + err.message, true);
+  }
+}
+
+function renderReports() {
+  const list = document.getElementById('reportsList');
+  const empty = document.getElementById('reportsEmpty');
+  if (!reports.length) {
+    list.innerHTML = '';
+    empty.hidden = false;
+    return;
+  }
+  empty.hidden = true;
+  list.innerHTML = reports.map(r => {
+    const cat = REPORT_CATEGORY_LABELS[r.category] || r.category;
+    const where = r.amenity_name ? `${r.amenity_name}` : `amenity #${r.amenity_id}`;
+    const who = r.username ? `@${r.username}` : 'guest';
+    const created = r.created_at ? new Date(r.created_at).toLocaleString() : '';
+    const opts = REPORT_STATUSES.map(s =>
+      `<option value="${s}"${s === r.status ? ' selected' : ''}>${s}</option>`
+    ).join('');
+    return `
+      <li id="rep-${r.id}">
+        <div><strong>${escapeHtml(cat)}</strong> · ${escapeHtml(where)}</div>
+        <div class="meta">${escapeHtml(who)} · ${escapeHtml(created)}</div>
+        ${r.description ? `<div class="meta">${escapeHtml(r.description)}</div>` : ''}
+        <div class="actions">
+          <select id="rep-status-${r.id}" class="report-status">${opts}</select>
+          <button class="subtle" onclick="saveReportStatus(${r.id})">Save</button>
+        </div>
+      </li>`;
+  }).join('');
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+async function saveReportStatus(id) {
+  const sel = document.getElementById(`rep-status-${id}`);
+  const next = sel.value;
+  try {
+    const res = await fetch(`/api/admin/reports/${id}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: next }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    const i = reports.findIndex(r => r.id === id);
+    if (i >= 0) reports[i] = { ...reports[i], ...data.report };
+    renderReports();
+    toast(`Report #${id} → ${next}.`);
+  } catch (err) {
+    toast(err.message || 'Failed to update report.', true);
+  }
+}
+
+function renderNodes() {
+  nodeMarkers.forEach(m => m.setMap(null));
+  nodeMarkers.clear();
+  for (const n of nodes) {
+    const marker = new google.maps.Marker({
+      position: { lat: n.latitude, lng: n.longitude },
+      map,
+      title: `Node ${n.id}${n.label ? ' — ' + n.label : ''}${n.is_closed ? ' (closed)' : ''}`,
+      icon: {
+        path: google.maps.SymbolPath.CIRCLE,
+        scale: 5,
+        fillColor: colorForNode(n),
+        fillOpacity: 1,
+        strokeColor: '#0f172a',
+        strokeWeight: 1,
+      },
+    });
+    marker.addListener('click', () => onNodeClick(n));
+    nodeMarkers.set(n.id, marker);
+  }
+}
+
+function renderEdges() {
+  edgePolylines.forEach(p => p.setMap(null));
+  edgePolylines.clear();
+  for (const e of edges) {
+    const path = [
+      { lat: e.from_lat, lng: e.from_lng },
+      { lat: e.to_lat, lng: e.to_lng },
+    ];
+    const line = new google.maps.Polyline({
+      path,
+      map,
+      strokeColor: colorForEdge(e),
+      strokeOpacity: e.is_closed ? 0.95 : 0.55,
+      strokeWeight: e.is_closed ? 4 : 2,
+      clickable: true,
+    });
+    line.addListener('click', () => onEdgeClick(e));
+    edgePolylines.set(e.id, line);
+  }
+}
+
+function renderAmenities() {
+  amenityMarkers.forEach(m => m.setMap(null));
+  amenityMarkers.clear();
+  for (const a of amenities) {
+    const marker = new google.maps.Marker({
+      position: { lat: a.latitude, lng: a.longitude },
+      map,
+      title: `${a.name} — ${a.type} (${a.status || 'open'})`,
+      icon: {
+        path: google.maps.SymbolPath.BACKWARD_CLOSED_ARROW,
+        scale: 4,
+        fillColor: colorForAmenity(a),
+        fillOpacity: 1,
+        strokeColor: '#0f172a',
+        strokeWeight: 1,
+      },
+    });
+    marker.addListener('click', () => onAmenityClick(a));
+    amenityMarkers.set(a.id, marker);
+  }
+}
+
+async function onNodeClick(n) {
+  if (!paintOn) {
+    toast(`Node ${n.id}${n.label ? ' — ' + n.label : ''}${n.is_closed ? ' (closed)' : ''}`);
+    return;
+  }
+  await paintGraph('nodes', [n.id]);
+}
+
+async function onEdgeClick(e) {
+  if (!paintOn) {
+    toast(`Edge ${e.id} (${e.from_node} → ${e.to_node})${e.is_closed ? ' — closed' : ''}`);
+    return;
+  }
+  await paintGraph('edges', [e.id]);
+}
+
+async function paintGraph(kind, ids) {
+  const body = {
+    ids,
+    is_closed: brush === 'close',
+    reason: document.getElementById('reasonInput').value.trim() || null,
+  };
+  try {
+    const res = await fetch(`/api/admin/nav/${kind}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    // Refresh just the affected layer instead of the whole map.
+    if (kind === 'nodes') {
+      const updatedIds = new Set((data.rows || []).map(r => r.id));
+      const updatedClosed = new Map((data.rows || []).map(r => [r.id, r.is_closed]));
+      for (const n of nodes) {
+        if (updatedIds.has(n.id)) n.is_closed = updatedClosed.get(n.id);
+      }
+      renderNodes();
+    } else {
+      const updatedIds = new Set((data.rows || []).map(r => r.id));
+      const updatedClosed = new Map((data.rows || []).map(r => [r.id, r.is_closed]));
+      for (const e of edges) {
+        if (updatedIds.has(e.id)) e.is_closed = updatedClosed.get(e.id);
+      }
+      renderEdges();
+    }
+    toast(`${kind} ${brush === 'close' ? 'closed' : 'opened'} (${data.updated}).`);
+  } catch (err) {
+    toast(err.message || 'Paint failed.', true);
+  }
+}
+
+async function onAmenityClick(a) {
+  // Cycle to the next status. Skip 'busy' if it's our current to keep the
+  // cycle obvious for the demo (open → closed → open).
+  const nextStatus = a.status === 'closed' ? 'open' : 'closed';
+  try {
+    const res = await fetch(`/api/admin/amenity/${a.id}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: nextStatus }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    a.status = data.status;
+    renderAmenities();
+    toast(`${a.name}: ${data.status}.`);
+  } catch (err) {
+    toast(err.message || 'Status update failed.', true);
+  }
+}
+
+document.getElementById('paintToggle').addEventListener('click', () => {
+  paintOn = !paintOn;
+  const btn = document.getElementById('paintToggle');
+  btn.textContent = `Paint: ${paintOn ? 'ON' : 'OFF'}`;
+  btn.classList.toggle('on', paintOn);
+  document.getElementById('paintControls').hidden = !paintOn;
+  // Disable map panning while paint is ON so drag becomes a selection
+  // rectangle. Zoom (scroll / pinch) still works via gestureHandling.
+  // Paint ON: disable Google's left-drag pan so left-drag becomes the
+  // rectangle. Middle-mouse-button drag (handled in setupDragSelectPaint)
+  // pans the map manually via panBy(). Scroll-zoom still works.
+  if (map) {
+    map.setOptions({ draggable: !paintOn });
+    document.getElementById('map').style.cursor = paintOn ? 'crosshair' : '';
+  }
+});
+
+document.querySelectorAll('.brush-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    brush = b.dataset.brush;
+    document.querySelectorAll('.brush-btn').forEach(x => x.classList.toggle('active', x === b));
+    toast(`Brush: ${brush === 'close' ? 'Close' : 'Open'}`);
+  });
+});
+
+document.getElementById('refreshBtn').addEventListener('click', () => loadAll());
+</script>
+<script src="https://maps.googleapis.com/maps/api/js?key={{MAPS_API_KEY}}&callback=initMap" async defer></script>
+</body>
+</html>

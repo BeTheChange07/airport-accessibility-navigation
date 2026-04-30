@@ -323,6 +323,21 @@ class NavigationViewModel : ViewModel() {
                 _state.value = _state.value.copy(currentZone = nearest.zone)
                 val response = api.getRoute(nearest.node_id, amenity.nodeid)
                 applyRouteResponse(response.copy(destination_name = amenity.name))
+            } catch (e: retrofit2.HttpException) {
+                // 404 here means pgr_dijkstra found no open path to this
+                // specific amenity (closures cut it off). Surface that as
+                // plain English and tell the user to pick something else.
+                val msg = if (e.code() == 404)
+                    "Can't reach ${amenity.name} right now — closures are blocking the route. Pick another amenity."
+                else
+                    "Failed to route to ${amenity.name}: ${e.message}"
+                _state.value = _state.value.copy(
+                    isLoading = false,
+                    error = msg,
+                    destinationAmenityId = null,
+                    lastKnownDestinationStatus = null,
+                    lastKnownDestinationOccupancy = null,
+                )
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
                     isLoading = false,
@@ -364,11 +379,20 @@ class NavigationViewModel : ViewModel() {
                 )
                 applyRouteResponse(response)
             } catch (e: retrofit2.HttpException) {
-                val body = try { e.response()?.errorBody()?.string() } catch (_: Exception) { null }
-                val msg = body ?: e.message ?: "Request failed"
-                val friendly = if (e.code() == 404 && _state.value.accessibilityMode) {
-                    "No accessible $amenityType found near you. Try turning off accessibility mode."
-                } else msg
+                // 404 from /api/route-to-amenity means every candidate of
+                // this type was either out-of-zone or pgr_dijkstra couldn't
+                // reach any of them. Translate the raw HTTP into plain text
+                // that points the user at a different choice.
+                val friendly = when {
+                    e.code() == 404 && _state.value.accessibilityMode ->
+                        "No accessible $amenityType reachable from here. Try turning off accessibility mode or pick a different type."
+                    e.code() == 404 ->
+                        "No $amenityType reachable from here right now — closures are blocking every option. Try a different type."
+                    else -> {
+                        val body = try { e.response()?.errorBody()?.string() } catch (_: Exception) { null }
+                        body ?: e.message ?: "Request failed"
+                    }
+                }
                 _state.value = _state.value.copy(isLoading = false, error = friendly)
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
@@ -519,6 +543,15 @@ class NavigationViewModel : ViewModel() {
                 applyRouteResponse(response)
                 _state.value = _state.value.copy(isRecalculating = false)
                 startSimulation()
+            } catch (e: retrofit2.HttpException) {
+                // 404 here means even with the off-path nudge, dijkstra
+                // can't find a way to the original destination -- closures
+                // have boxed us in. Tell the user to pick a new target.
+                val msg = if (e.code() == 404)
+                    "Can't find a way to your destination — closures are blocking every detour. Stop and pick a new amenity."
+                else
+                    "Recalculation failed: ${e.message}"
+                _state.value = _state.value.copy(isRecalculating = false, error = msg)
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
                     isRecalculating = false,
