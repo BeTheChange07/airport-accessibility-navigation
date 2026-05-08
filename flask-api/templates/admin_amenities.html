@@ -146,6 +146,9 @@
       <option value="secure">Secure (post-TSA)</option>
     </select>
     <button id="refreshBtn" class="subtle">Refresh</button>
+    <span style="flex:1"></span>
+    <button id="bulkCloseBtn" class="danger" title="Close every row currently visible in the table">Close all visible</button>
+    <button id="bulkOpenBtn" class="success" title="Set every visible row to open">Open all visible</button>
   </div>
 
   <table>
@@ -251,7 +254,8 @@ function renderRow(a) {
       <td><span class="zone-pill ${zoneClass}">${zoneDisplay}</span></td>
       <td>
         <span class="status-pill ${statusClass}">${a.status || 'open'}</span>
-        <select id="status-${a.id}" style="margin-left:.4rem">${options}</select>
+        <select id="status-${a.id}" style="margin-left:.4rem"
+                onchange="saveStatus(${a.id})">${options}</select>
       </td>
       <td>
         ${a.occupancy
@@ -260,7 +264,6 @@ function renderRow(a) {
       </td>
       <td>
         <div class="row-actions">
-          <button onclick="saveStatus(${a.id})">Save</button>
           ${occActions}
         </div>
       </td>
@@ -347,6 +350,49 @@ document.getElementById('zoneFilter').addEventListener('change', (e) => {
 document.getElementById('refreshBtn').addEventListener('click', () => {
   fetchAmenities().catch(e => toast(e.message, true));
 });
+
+async function bulkSetStatus(targetStatus) {
+  // Apply targetStatus to every row currently visible under the filter
+  // controls. Skips rows already at that status so we don't spam pointless
+  // writes. Sequenced (not Promise.all) so the toasts are readable and a
+  // single failure doesn't leave the rest of the batch in an unknown state.
+  const visible = amenities
+    .filter(a => currentFilter === '__all__' || a.type === currentFilter)
+    .filter(a => currentZone === '__all__' || a.zone === currentZone)
+    .filter(a => a.status !== targetStatus);
+  if (!visible.length) {
+    toast(`Nothing to update — all visible rows are already ${targetStatus}.`);
+    return;
+  }
+  if (!confirm(`Set ${visible.length} amenity row(s) to ${targetStatus}?`)) return;
+
+  let ok = 0, fail = 0;
+  for (const a of visible) {
+    try {
+      const res = await fetch(`/api/admin/amenity/${a.id}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: targetStatus })
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      mergeAmenity(body);
+      ok += 1;
+    } catch (e) {
+      fail += 1;
+      console.error(`bulk ${targetStatus} failed for ${a.id}:`, e);
+    }
+  }
+  render();
+  if (fail) {
+    toast(`${ok} updated, ${fail} failed — see console.`, true);
+  } else {
+    toast(`${ok} amenity row(s) set to ${targetStatus}.`);
+  }
+}
+
+document.getElementById('bulkCloseBtn').addEventListener('click', () => bulkSetStatus('closed'));
+document.getElementById('bulkOpenBtn').addEventListener('click', () => bulkSetStatus('open'));
 
 fetchAmenities().catch(e => toast(e.message, true));
 </script>

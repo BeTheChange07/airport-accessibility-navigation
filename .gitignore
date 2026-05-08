@@ -16,6 +16,9 @@ local.properties
 *.env
 RUNNING.md
 
+# Runtime log files (Flask stdout redirects, sensor mocks, etc.)
+*.log
+
 # Tooling caches / session data
 .idea/
 android-app/.idea/

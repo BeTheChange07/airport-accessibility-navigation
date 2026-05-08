@@ -25,6 +25,20 @@ const val AMENITY_POLL_INTERVAL_NAV_MS = 5_000L
 // Statuses an admin can set that mean "don't route here."
 internal val AMENITY_UNROUTABLE_STATUSES = setOf("closed", "maintenance", "out_of_service")
 
+/** Decoded subset of the JSON 404 body that /api/route-to-amenity returns. */
+internal data class RouteErrorBody(val error: String?, val reason: String?)
+
+/**
+ * Best-effort JSON parse for the route-to-amenity 404 body. Returns null when
+ * the body is empty or malformed; callers fall back to a generic message.
+ */
+internal fun parseRouteErrorBody(body: String?): RouteErrorBody? {
+    if (body.isNullOrBlank()) return null
+    return try {
+        com.google.gson.Gson().fromJson(body, RouteErrorBody::class.java)
+    } catch (_: Exception) { null }
+}
+
 enum class RestroomGender { ANY, MALE, FEMALE }
 
 /** Why the ViewModel wants the user to reroute mid-navigation. */
@@ -49,6 +63,11 @@ data class NavigationState(
     val destinationName: String? = null,
     // Simulation
     val isSimulating: Boolean = false,
+    // Distinguishes "stopped at waypoint N waiting to resume" from
+    // "freshly routed at waypoint 0 waiting to start". When true, the
+    // Simulate button is relabelled "Resume" and startSimulation picks up
+    // from `currentWaypointIndex` instead of resetting to 0.
+    val isSimulationPaused: Boolean = false,
     val currentBearing: Float = 0f,
     val distanceToNextMeters: Double = 0.0,
     val cardinalDirection: String = "",
@@ -76,6 +95,7 @@ data class NavigationState(
     val lastKnownDestinationOccupancy: String? = null,
     // Parked here until the user confirms or declines the corresponding prompt.
     val pendingOccupancyWarning: Amenity? = null,   // route-start warning (UC5 specific-pin)
+    val pendingClosedAmenity: Amenity? = null,      // route-start warning when pin is closed/maintenance (UC7)
     val pendingReroutePrompt: ReroutePrompt? = null, // mid-route full / closed (UC5 + UC7)
 )
 
@@ -139,12 +159,21 @@ class NavigationViewModel : ViewModel() {
             while (true) {
                 try {
                     val response = api.getAmenities()
-                    val sample = response.amenities.firstOrNull { it.type == "restroom" }
+                    // Itemise unroutable amenities by name so we can tell from
+                    // logcat exactly what the admin portal flipped — the old
+                    // "sample restroom" log only showed the first restroom in
+                    // the response, which hid every other status change.
+                    val closedNames = response.amenities
+                        .filter { it.status.lowercase() in AMENITY_UNROUTABLE_STATUSES }
+                        .joinToString(", ") { "${it.name}(${it.status})" }
+                        .ifEmpty { "none" }
+                    val statusCounts = response.amenities
+                        .groupingBy { it.status.lowercase() }
+                        .eachCount()
                     Log.d(
                         "AmenityPoll",
-                        "got ${response.amenities.size} amenities " +
-                            "(sample restroom: ${sample?.name} status=${sample?.status} " +
-                            "occ=${sample?.occupancy} crowd=${sample?.crowdlevel})"
+                        "got ${response.amenities.size} amenities; " +
+                            "statusCounts=$statusCounts; closed=$closedNames"
                     )
                     onAmenitiesRefreshed(response.amenities)
                 } catch (e: Exception) {
@@ -263,6 +292,15 @@ class NavigationViewModel : ViewModel() {
             _state.value = _state.value.copy(pendingCrossZoneAmenity = amenity)
             return
         }
+        // UC7: closed / maintenance / out-of-service amenities are not
+        // routable destinations. /api/route doesn't filter by amenity status
+        // (it just walks the graph), so we have to gate it here. Park the
+        // amenity in pendingClosedAmenity so the dialog can offer to route
+        // the user to the next-nearest open one of the same type.
+        if (amenity.status.lowercase() in AMENITY_UNROUTABLE_STATUSES) {
+            _state.value = _state.value.copy(pendingClosedAmenity = amenity)
+            return
+        }
         // UC5: warn before routing to a high-occupancy or full restroom.
         // The backend's /api/route doesn't filter by occupancy (it obeys
         // the user's explicit choice), so the confirmation lives here.
@@ -283,6 +321,19 @@ class NavigationViewModel : ViewModel() {
 
     fun dismissOccupancyWarning() {
         _state.value = _state.value.copy(pendingOccupancyWarning = null)
+    }
+
+    /** User accepted "find next-nearest open" from the closed-amenity warning. */
+    fun confirmClosedAmenityReroute() {
+        val amenity = _state.value.pendingClosedAmenity ?: return
+        _state.value = _state.value.copy(pendingClosedAmenity = null)
+        // Hand off to the find-nearest flow so the backend's status/occupancy
+        // filter picks the closest *open* one of the same type.
+        routeToAmenity(amenity.type)
+    }
+
+    fun dismissClosedAmenityWarning() {
+        _state.value = _state.value.copy(pendingClosedAmenity = null)
     }
 
     /** User accepted the mid-route "destination filled up / closed" prompt. */
@@ -380,18 +431,22 @@ class NavigationViewModel : ViewModel() {
                 applyRouteResponse(response)
             } catch (e: retrofit2.HttpException) {
                 // 404 from /api/route-to-amenity means every candidate of
-                // this type was either out-of-zone or pgr_dijkstra couldn't
-                // reach any of them. Translate the raw HTTP into plain text
-                // that points the user at a different choice.
-                val friendly = when {
-                    e.code() == 404 && _state.value.accessibilityMode ->
-                        "No accessible $amenityType reachable from here. Try turning off accessibility mode or pick a different type."
-                    e.code() == 404 ->
-                        "No $amenityType reachable from here right now — closures are blocking every option. Try a different type."
-                    else -> {
-                        val body = try { e.response()?.errorBody()?.string() } catch (_: Exception) { null }
-                        body ?: e.message ?: "Request failed"
-                    }
+                // this type was either out-of-zone, all closed, all full, or
+                // pgr_dijkstra couldn't reach any of them. The backend tags
+                // the response with a `reason` so we can show the user a
+                // message that matches the actual cause instead of always
+                // saying "closures are blocking" — that misled testers when
+                // the real problem was that everything was full.
+                val rawBody = try { e.response()?.errorBody()?.string() } catch (_: Exception) { null }
+                val parsed = parseRouteErrorBody(rawBody)
+                val friendly = if (e.code() == 404) {
+                    parsed?.error
+                        ?: if (_state.value.accessibilityMode)
+                            "No accessible $amenityType reachable from here. Try turning off accessibility mode or pick a different type."
+                        else
+                            "No $amenityType reachable from here right now."
+                } else {
+                    parsed?.error ?: rawBody ?: e.message ?: "Request failed"
                 }
                 _state.value = _state.value.copy(isLoading = false, error = friendly)
             } catch (e: Exception) {
@@ -453,6 +508,9 @@ class NavigationViewModel : ViewModel() {
                 ?: _state.value.lastKnownDestinationOccupancy,
             // A fresh route clears any previous mid-route prompt.
             pendingReroutePrompt = null,
+            // …and any paused-mid-route state — the index would point at the
+            // old route's waypoints and crash a Resume click.
+            isSimulationPaused = false,
         )
 
         // Resume simulation on the new waypoints.
@@ -461,20 +519,29 @@ class NavigationViewModel : ViewModel() {
 
     fun startSimulation() {
         if (_state.value.waypoints.isEmpty()) return
+        // Resume from the paused waypoint index instead of restarting from 0
+        // when the user hits Resume after a Pause. Fresh starts (and the
+        // wasSimulating restart inside applyRouteResponse) still reset to 0
+        // because isSimulationPaused is false in those cases.
+        val resumeIndex = if (_state.value.isSimulationPaused)
+            _state.value.currentWaypointIndex.coerceIn(0, _state.value.waypoints.lastIndex)
+        else 0
         stopSimulation()
 
         _state.value = _state.value.copy(
             isSimulating = true,
-            currentWaypointIndex = 0,
+            isSimulationPaused = false,
+            currentWaypointIndex = resumeIndex,
             userLocation = LatLng(
-                _state.value.waypoints[0].latitude,
-                _state.value.waypoints[0].longitude
+                _state.value.waypoints[resumeIndex].latitude,
+                _state.value.waypoints[resumeIndex].longitude
             )
         )
 
         simulationJob = viewModelScope.launch {
             val waypoints = _state.value.waypoints
-            for (i in waypoints.indices) {
+            val startIdx = resumeIndex
+            for (i in startIdx until waypoints.size) {
                 val wp = waypoints[i]
                 _state.value = _state.value.copy(
                     currentWaypointIndex = i,
@@ -505,10 +572,38 @@ class NavigationViewModel : ViewModel() {
     fun stopSimulation() {
         simulationJob?.cancel()
         simulationJob = null
-        _state.value = _state.value.copy(isSimulating = false)
+        // Full stop — clear the paused flag too. Pausing is the *temporary*
+        // variant; this one is fired by Stop / setMockStart / new-route swap
+        // and means "really kill the walker."
+        _state.value = _state.value.copy(isSimulating = false, isSimulationPaused = false)
+    }
+
+    /**
+     * Pause the in-progress walker. Cancels the coroutine but keeps
+     * `currentWaypointIndex` and `userLocation` so [startSimulation] can pick
+     * up where it left off. Use this for "pause-mid-route" interactions
+     * (e.g. stopping to flip an amenity status in the admin tool, then
+     * resuming) — Stop is for fully ending navigation.
+     */
+    fun pauseSimulation() {
+        if (!_state.value.isSimulating) return
+        simulationJob?.cancel()
+        simulationJob = null
+        _state.value = _state.value.copy(
+            isSimulating = false,
+            isSimulationPaused = true,
+            currentInstruction = "Paused — tap Resume to continue",
+        )
     }
 
     fun goOffPath() {
+        // Drop rapid double-clicks. The Flask dev server shares one psycopg2
+        // cursor across threads, so two recalcs racing through it produce
+        // "another command is currently in progress" → HTTP 500 that sticks
+        // on screen. Single in-flight at a time keeps the cursor safe and
+        // makes the UX deterministic.
+        if (_state.value.isRecalculating) return
+
         val current = _state.value.userLocation ?: return
         val destinationId = _state.value.destinationNodeId ?: return
         // Off-path teleports must stay in the user's current zone.
@@ -523,11 +618,19 @@ class NavigationViewModel : ViewModel() {
             (111000.0 * Math.cos(Math.toRadians(current.latitude)))
         val offPathLocation = LatLng(current.latitude + offsetLat, current.longitude + offsetLng)
 
-        stopSimulation()
+        // Don't stop/start the simulation here — applyRouteResponse already
+        // captures `wasSimulating` and restarts only if it was running. Off-
+        // path while *paused* should give the user a fresh route they can
+        // step through manually (or hit Simulate on); only auto-resume the
+        // walker when the previous run was already moving.
+        // Clearing `error` here so a successful retry wipes the previous
+        // failure's red banner — otherwise a stale "Recalculation failed"
+        // sits on screen until something else clears it.
         _state.value = _state.value.copy(
             userLocation = offPathLocation,
             isRecalculating = true,
-            currentInstruction = "Recalculating..."
+            currentInstruction = "Recalculating...",
+            error = null,
         )
 
         recalculateRoute(offPathLocation, destinationId, zone)
@@ -542,7 +645,10 @@ class NavigationViewModel : ViewModel() {
                 val response = api.getRoute(nearest.node_id, destinationNodeId)
                 applyRouteResponse(response)
                 _state.value = _state.value.copy(isRecalculating = false)
-                startSimulation()
+                // applyRouteResponse already auto-resumes simulation when the
+                // user was simulating before the recalc; we no longer force-
+                // start it here because Go Off Path from a paused state must
+                // stay paused.
             } catch (e: retrofit2.HttpException) {
                 // 404 here means even with the off-path nudge, dijkstra
                 // can't find a way to the original destination -- closures

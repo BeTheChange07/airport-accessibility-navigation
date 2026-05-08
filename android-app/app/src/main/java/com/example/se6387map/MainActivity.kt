@@ -30,6 +30,7 @@ import androidx.core.app.ActivityCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.location.*
 import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.model.BitmapDescriptor
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
@@ -191,6 +192,10 @@ fun NavigationScreen(
 
             // Amenity markers (filtered)
             val visibleAmenities = filteredAmenities(state)
+            // Build the closed-amenity bitmap once per composition; reuse
+            // across every unroutable pin instead of paying the canvas cost
+            // per marker per recomposition.
+            val closedIcon = remember { buildClosedAmenityIcon() }
             visibleAmenities.forEach { amenity ->
                 // Include status + occupancy in the key so the marker is
                 // recreated (not just recomposed) when those change. Works
@@ -202,11 +207,20 @@ fun NavigationScreen(
                     val markerState = rememberMarkerState(position = pos)
                     // Force-sync position so filtering doesn't leave a stale LatLng.
                     markerState.position = pos
+                    val isUnroutable = amenity.status.lowercase() in AMENITY_UNROUTABLE_STATUSES
                     Marker(
                         state = markerState,
-                        title = amenity.name,
+                        // Prefix the title so it's obvious in the info window
+                        // and on accessibility readouts that the pin isn't a
+                        // normal destination.
+                        title = if (isUnroutable)
+                            "[${amenity.status.uppercase()}] ${amenity.name}"
+                        else amenity.name,
                         snippet = amenityMarkerSnippet(amenity),
-                        icon = BitmapDescriptorFactory.defaultMarker(hue),
+                        // Closed pins get an unmistakable red "no-entry" badge.
+                        // Open pins keep the existing hue gradient.
+                        icon = if (isUnroutable) closedIcon
+                            else BitmapDescriptorFactory.defaultMarker(hue),
                         onClick = {
                             viewModel.selectAmenity(amenity)
                             true
@@ -215,7 +229,10 @@ fun NavigationScreen(
                 }
             }
 
-            // User position marker (pulsing dot simulated with a circle + marker)
+            // User position marker — custom "blue dot" bitmap so it can't be
+            // mistaken for an amenity teardrop pin, plus a faint accuracy
+            // ring for scale.
+            val userIcon = remember { buildUserLocationIcon() }
             state.userLocation?.let { loc ->
                 Circle(
                     center = loc,
@@ -229,8 +246,11 @@ fun NavigationScreen(
                 Marker(
                     state = userMarkerState,
                     title = "You",
-                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE),
-                    anchor = androidx.compose.ui.geometry.Offset(0.5f, 0.5f)
+                    icon = userIcon,
+                    anchor = androidx.compose.ui.geometry.Offset(0.5f, 0.5f),
+                    // Sit above amenity pins so a stack-up doesn't hide the
+                    // user's own location.
+                    zIndex = 5f,
                 )
             }
         }
@@ -385,6 +405,38 @@ fun NavigationScreen(
                 },
                 dismissButton = {
                     TextButton(onClick = { viewModel.dismissOccupancyWarning() }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+
+        // UC7: route-start warning when the user taps a closed / maintenance pin.
+        // /api/route would otherwise happily walk them to a locked door, so
+        // we intercept here and offer to find an open one of the same type.
+        state.pendingClosedAmenity?.let { amenity ->
+            val statusLabel = when (amenity.status.lowercase()) {
+                "closed" -> "closed"
+                "maintenance" -> "under maintenance"
+                "out_of_service" -> "out of service"
+                else -> amenity.status
+            }
+            AlertDialog(
+                onDismissRequest = { viewModel.dismissClosedAmenityWarning() },
+                title = { Text("Destination is $statusLabel") },
+                text = {
+                    Text(
+                        "${amenity.name} is $statusLabel right now, so you can't " +
+                            "route there. Find the next-nearest open ${amenity.type}?"
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.confirmClosedAmenityReroute() }) {
+                        Text("Find next-nearest")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { viewModel.dismissClosedAmenityWarning() }) {
                         Text("Cancel")
                     }
                 }
@@ -644,7 +696,11 @@ fun NavigationScreen(
                     ) {
                         Column {
                             Text(
-                                text = if (state.isSimulating) "Simulating..." else "Route ready",
+                                text = when {
+                                    state.isSimulating -> "Simulating..."
+                                    state.isSimulationPaused -> "Paused"
+                                    else -> "Route ready"
+                                },
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
@@ -667,24 +723,39 @@ fun NavigationScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        // Start / Resume simulation
-                        if (!state.isSimulating) {
+                        // Sim / Pause / Resume — single button that swaps role
+                        // based on simulator state. Stop (top of card) is the
+                        // hard exit; this one is the soft pause-resume.
+                        if (state.isSimulating) {
+                            Button(
+                                onClick = { viewModel.pauseSimulation() },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A73E8))
+                            ) {
+                                Text("Pause")
+                            }
+                        } else {
+                            val label = if (state.isSimulationPaused) "Resume" else "Simulate"
                             Button(
                                 onClick = { viewModel.startSimulation() },
                                 modifier = Modifier.weight(1f),
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF34A853))
                             ) {
-                                Text("Simulate")
+                                Text(label)
                             }
                         }
 
-                        // Go off-path button
+                        // Go off-path button. Disabled while a recalc is in
+                        // flight to prevent a click-storm from queuing parallel
+                        // backend hits — the Flask dev server's shared cursor
+                        // races on those and 500s.
                         Button(
                             onClick = { viewModel.goOffPath() },
+                            enabled = !state.isRecalculating,
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF9800))
                         ) {
-                            Text("Go Off Path")
+                            Text(if (state.isRecalculating) "Recalculating…" else "Go Off Path")
                         }
                     }
                 }
@@ -806,6 +877,71 @@ fun FiltersSection(
             }
         }
     }
+}
+
+/**
+ * Build the "you are here" location dot, returned as a [BitmapDescriptor].
+ * Solid blue centre + white halo — visually nothing like the amenity teardrop
+ * pins, so the user can't confuse their own position with a restroom.
+ *
+ * Cached in a Compose `remember` block by the caller.
+ */
+internal fun buildUserLocationIcon(): BitmapDescriptor {
+    val sizePx = 72
+    val bmp = android.graphics.Bitmap.createBitmap(
+        sizePx, sizePx, android.graphics.Bitmap.Config.ARGB_8888
+    )
+    val canvas = android.graphics.Canvas(bmp)
+    val cx = sizePx / 2f
+    val cy = sizePx / 2f
+    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+    // Outer halo — soft, low-alpha blue ring like Google Maps.
+    paint.style = android.graphics.Paint.Style.FILL
+    paint.color = android.graphics.Color.argb(60, 66, 133, 244)
+    canvas.drawCircle(cx, cy, sizePx / 2f - 2f, paint)
+    // White ring (the "halo" that separates the dot from the map).
+    paint.color = android.graphics.Color.WHITE
+    canvas.drawCircle(cx, cy, sizePx * 0.30f, paint)
+    // Solid blue centre dot.
+    paint.color = android.graphics.Color.parseColor("#4285F4")
+    canvas.drawCircle(cx, cy, sizePx * 0.24f, paint)
+    return BitmapDescriptorFactory.fromBitmap(bmp)
+}
+
+/**
+ * Build a "no-entry" style red disc with a white slash, returned as a
+ * [BitmapDescriptor]. Used for closed / maintenance / out-of-service pins —
+ * the default marker hues alone weren't reading as "do not go here" during
+ * demos, so we draw an unmistakable badge instead.
+ *
+ * Cached in a Compose `remember` block by the caller so we don't redraw the
+ * bitmap on every recomposition.
+ */
+internal fun buildClosedAmenityIcon(): BitmapDescriptor {
+    val sizePx = 96
+    val bmp = android.graphics.Bitmap.createBitmap(
+        sizePx, sizePx, android.graphics.Bitmap.Config.ARGB_8888
+    )
+    val canvas = android.graphics.Canvas(bmp)
+    val cx = sizePx / 2f
+    val cy = sizePx / 2f
+    val r = sizePx / 2f - 4f
+    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+    // White outer halo so the red still reads on dark map tiles.
+    paint.style = android.graphics.Paint.Style.FILL
+    paint.color = android.graphics.Color.WHITE
+    canvas.drawCircle(cx, cy, r + 3f, paint)
+    // Solid red disc.
+    paint.color = android.graphics.Color.parseColor("#D32F2F")
+    canvas.drawCircle(cx, cy, r, paint)
+    // White diagonal slash (no-entry symbol).
+    paint.color = android.graphics.Color.WHITE
+    paint.style = android.graphics.Paint.Style.STROKE
+    paint.strokeWidth = sizePx * 0.14f
+    paint.strokeCap = android.graphics.Paint.Cap.ROUND
+    val pad = sizePx * 0.27f
+    canvas.drawLine(pad, pad, sizePx - pad, sizePx - pad, paint)
+    return BitmapDescriptorFactory.fromBitmap(bmp)
 }
 
 /**

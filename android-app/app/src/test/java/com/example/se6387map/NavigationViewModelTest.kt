@@ -243,4 +243,67 @@ class NavigationViewModelTest {
         )
         assertFalse(filteredAmenities(state).isEmpty())
     }
+
+    /**
+     * Validates the per-status routing decision for every value the admin
+     * dropdown can write. open/busy go straight to the route call, while
+     * closed/maintenance/out_of_service must park in pendingClosedAmenity so
+     * the dialog can offer a reroute. Keeps the mobile side and the backend
+     * `a.status IN ('open','busy')` SQL filter aligned.
+     */
+    private fun seededVm(targetStatus: String, occupancy: String? = null): NavigationViewModel {
+        val vm = NavigationViewModel()
+        vm.seedStartForTest(LatLng(32.9, -97.0), "secure")
+        return vm
+    }
+
+    @Test
+    fun routeToSpecificAmenity_blocksClosed() {
+        val vm = seededVm("closed")
+        vm.routeToSpecificAmenity(amenity(1, "restroom", status = "closed"))
+        assertEquals(1, vm.state.value.pendingClosedAmenity?.id)
+    }
+
+    @Test
+    fun routeToSpecificAmenity_blocksMaintenance() {
+        val vm = seededVm("maintenance")
+        vm.routeToSpecificAmenity(amenity(1, "restroom", status = "maintenance"))
+        assertEquals(1, vm.state.value.pendingClosedAmenity?.id)
+    }
+
+    @Test
+    fun routeToSpecificAmenity_blocksOutOfService() {
+        val vm = seededVm("out_of_service")
+        vm.routeToSpecificAmenity(amenity(1, "restroom", status = "out_of_service"))
+        assertEquals(1, vm.state.value.pendingClosedAmenity?.id)
+    }
+
+    // open/busy are intentionally NOT covered here: they fall through to
+    // `executeRouteToAmenity` which spins up a viewModelScope coroutine and
+    // needs Dispatchers.Main set up. The backend test
+    // TestGenerateRouteToAmenity.test_status_filter_for_each_dropdown_value
+    // already pins that those two values reach the dijkstra path.
+
+    @Test
+    fun pauseSimulation_isNoopWhenNotSimulating() {
+        // Pause must not flip the paused flag if the walker isn't actually
+        // running — otherwise a stray Pause click on a fresh route would hide
+        // the Simulate button behind a fake Resume.
+        val vm = NavigationViewModel()
+        vm.pauseSimulation()
+        assertFalse(vm.state.value.isSimulationPaused)
+    }
+
+    @Test
+    fun stopSimulation_clearsPausedFlag() {
+        // Stop is the hard exit; it must clear isSimulationPaused even if the
+        // walker was paused, so the next route doesn't open with a bogus
+        // Resume button.
+        val vm = NavigationViewModel()
+        // Force the paused state so we can verify stopSimulation wipes it.
+        val state = vm.state as kotlinx.coroutines.flow.MutableStateFlow<NavigationState>
+        state.value = state.value.copy(isSimulationPaused = true)
+        vm.stopSimulation()
+        assertFalse(vm.state.value.isSimulationPaused)
+    }
 }

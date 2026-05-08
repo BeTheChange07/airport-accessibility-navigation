@@ -590,6 +590,59 @@ def get_amenity_types():
         return jsonify({'error': str(e)}), 500
 
 
+_CLOSED_STATUSES = ('closed', 'maintenance', 'out_of_service')
+
+
+def _classify_no_candidates(rows):
+    """Pick the most specific reason when the filtered candidate set is empty.
+
+    `rows` is the unfiltered candidate list (status + occupancy only) for the
+    requested type/zone. Returns a (reason, message_fragment) tuple the caller
+    pairs with type/zone strings.
+
+    The reason granularity matters because the dropdown supports five admin
+    statuses (open, busy, closed, maintenance, out_of_service) and three of
+    those are unroutable. A user staring at "all closed" when they're really
+    looking at maintenance is confusing, so we surface the dominant flavor.
+    """
+    if not rows:
+        return 'none_in_zone', 'are not available in your area'
+
+    def status_count(name):
+        return sum(1 for r in rows if (r.get('status') or '').lower() == name)
+
+    closed = status_count('closed')
+    maint = status_count('maintenance')
+    oos = status_count('out_of_service')
+    unavail_total = closed + maint + oos
+    full = sum(1 for r in rows if (r.get('occupancy') or '').lower() == 'full')
+    total = len(rows)
+
+    # All rows blocked by an admin status flag (no occupancy involvement).
+    if unavail_total == total:
+        if closed == total:
+            return 'all_closed', 'are all closed'
+        if maint == total:
+            return 'all_maintenance', 'are all under maintenance'
+        if oos == total:
+            return 'all_out_of_service', 'are all out of service'
+        return 'all_unavailable_status', 'are all currently unavailable'
+
+    # All rows blocked purely by being full.
+    if full == total:
+        return 'all_full', 'are all full'
+
+    # Mix: some unavailable by status, some full. Tell the user it's mixed
+    # rather than picking one to lie about.
+    if unavail_total and full:
+        return 'all_unavailable_mixed', 'are unavailable (some closed, some full)'
+    if unavail_total:
+        return 'all_unavailable_status', 'are all currently unavailable'
+    if full:
+        return 'all_full', 'are all full'
+    return 'all_unavailable', 'are unavailable right now'
+
+
 @app.route('/api/route-to-amenity', methods=['GET'])
 def route_to_amenity():
     """Find the nearest amenity of a given type to the starting node and return the route."""
@@ -619,50 +672,54 @@ def route_to_amenity():
         #     occupancy IS NULL and pass this filter.
         routable_status_filter = "a.status IN ('open', 'busy')"
         routable_occupancy_filter = "(a.occupancy IS NULL OR a.occupancy <> 'full')"
+        accessibility_clause = (
+            "AND LOWER(COALESCE(a.wheelchairaccessible, '')) = 'yes'"
+            if accessible else ''
+        )
 
-        if accessible:
+        cur.execute(f"""
+            SELECT a.id AS amenity_id, a.nodeID, a.name, a.type,
+                   a.status, a.occupancy, a.crowdlevel,
+                   a.latitude, a.longitude,
+                   n.lat AS node_lat, n.lng AS node_lng,
+                   {AMENITY_DERIVED_ZONE_EXPR} AS node_zone
+            FROM amenities a
+            JOIN nav_nodes n ON n.id = a.nodeID
+            {AMENITY_DERIVED_ZONE_JOIN}
+            WHERE a.type = %s
+              AND {AMENITY_DERIVED_ZONE_EXPR} = %s
+              {accessibility_clause}
+              AND {routable_status_filter}
+              AND {routable_occupancy_filter}
+        """, (amenity_type, start_zone))
+        candidates = cur.fetchall()
+
+        if not candidates:
+            # Re-query without the status/occupancy filters so we can tell
+            # the user *why* nothing is available — "all closed" reads very
+            # differently from "all full" or "none here at all".
             cur.execute(f"""
-                SELECT a.id AS amenity_id, a.nodeID, a.name, a.type,
-                       a.status, a.occupancy, a.crowdlevel,
-                       a.latitude, a.longitude,
-                       n.lat AS node_lat, n.lng AS node_lng,
-                       {AMENITY_DERIVED_ZONE_EXPR} AS node_zone
+                SELECT a.status, a.occupancy
                 FROM amenities a
                 JOIN nav_nodes n ON n.id = a.nodeID
                 {AMENITY_DERIVED_ZONE_JOIN}
                 WHERE a.type = %s
                   AND {AMENITY_DERIVED_ZONE_EXPR} = %s
-                  AND LOWER(COALESCE(a.wheelchairaccessible, '')) = 'yes'
-                  AND {routable_status_filter}
-                  AND {routable_occupancy_filter}
+                  {accessibility_clause}
             """, (amenity_type, start_zone))
-            candidates = cur.fetchall()
-
-            if not candidates:
-                return jsonify({
-                    'error': f'No accessible {amenity_type} reachable from your zone ({start_zone})'
-                }), 404
-        else:
-            cur.execute(f"""
-                SELECT a.id AS amenity_id, a.nodeID, a.name, a.type,
-                       a.status, a.occupancy, a.crowdlevel,
-                       a.latitude, a.longitude,
-                       n.lat AS node_lat, n.lng AS node_lng,
-                       {AMENITY_DERIVED_ZONE_EXPR} AS node_zone
-                FROM amenities a
-                JOIN nav_nodes n ON n.id = a.nodeID
-                {AMENITY_DERIVED_ZONE_JOIN}
-                WHERE a.type = %s
-                  AND {AMENITY_DERIVED_ZONE_EXPR} = %s
-                  AND {routable_status_filter}
-                  AND {routable_occupancy_filter}
-            """, (amenity_type, start_zone))
-            candidates = cur.fetchall()
-
-            if not candidates:
-                return jsonify({
-                    'error': f'No {amenity_type} amenities reachable from your zone ({start_zone})'
-                }), 404
+            unfiltered = cur.fetchall()
+            reason, fragment = _classify_no_candidates(unfiltered)
+            access_prefix = 'accessible ' if accessible else ''
+            type_label = f'{access_prefix}{amenity_type}'
+            zone_label = 'secure area' if start_zone == 'secure' else 'public area'
+            message = f'{type_label.capitalize()} amenities in the {zone_label} {fragment}.'
+            return jsonify({
+                'error': message,
+                'reason': reason,
+                'amenity_type': amenity_type,
+                'zone': start_zone,
+                'accessible': accessible,
+            }), 404
 
         # Sort by straight-line distance using the linked nav_node coords
         # so we stay in the same frame as routing.
@@ -686,7 +743,13 @@ def route_to_amenity():
                 continue
 
         if not rows or not nearest:
-            return jsonify({'error': 'No routable amenity of that type found'}), 404
+            return jsonify({
+                'error': f'Closures are blocking the path to every open {amenity_type} from your location.',
+                'reason': 'unreachable',
+                'amenity_type': amenity_type,
+                'zone': start_zone,
+                'accessible': accessible,
+            }), 404
 
         waypoints = []
         prev_direction = None

@@ -242,12 +242,15 @@ class TestVerifySecurityZoneAccess:
     def test_no_amenities_in_zone_returns_404(self, client, cur):
         """/api/route-to-amenity scopes candidates to the start node's zone."""
         cur.queue_fetchone({"lat": 32.9, "lng": -97.0, "zone": "public"})
-        cur.queue_fetchall([])
+        cur.queue_fetchall([])  # filtered candidate query
+        cur.queue_fetchall([])  # unfiltered classification query
         res = client.get("/api/route-to-amenity?from_node=1&amenity_type=gate")
         assert res.status_code == 404
-        err = res.get_json()["error"]
-        assert "gate" in err
-        assert "public" in err
+        body = res.get_json()
+        err = body["error"]
+        assert "gate" in err.lower()
+        assert "public" in err.lower()
+        assert body["reason"] == "none_in_zone"
 
 
 class TestGenerateRouteToAmenity:
@@ -342,7 +345,8 @@ class TestGenerateRouteToAmenity:
     def test_candidate_sql_filters_closed_and_full(self, client, cur):
         """Route-to-amenity SQL includes the UC7 status filter and UC5 occupancy filter."""
         cur.queue_fetchone({"lat": 32.9, "lng": -97.0, "zone": "public"})
-        cur.queue_fetchall([])  # no candidates -> 404
+        cur.queue_fetchall([])  # filtered candidate query -> empty triggers 404
+        cur.queue_fetchall([])  # unfiltered classification query
         client.get("/api/route-to-amenity?from_node=1&amenity_type=restroom")
 
         candidate_sql = next(
@@ -352,6 +356,112 @@ class TestGenerateRouteToAmenity:
         assert candidate_sql is not None, "Expected candidate SELECT to have run"
         assert "a.status IN ('open', 'busy')" in candidate_sql
         assert "a.occupancy IS NULL OR a.occupancy <> 'full'" in candidate_sql
+
+    def test_all_closed_returns_specific_reason(self, client, cur):
+        """When every restroom in zone is admin-closed, reason='all_closed'."""
+        cur.queue_fetchone({"lat": 32.9, "lng": -97.0, "zone": "secure"})
+        cur.queue_fetchall([])  # filtered query — none routable
+        cur.queue_fetchall([    # unfiltered — every row is exactly 'closed'
+            {"status": "closed", "occupancy": "low"},
+            {"status": "closed", "occupancy": "medium"},
+            {"status": "closed", "occupancy": None},
+        ])
+        res = client.get("/api/route-to-amenity?from_node=1&amenity_type=restroom")
+        assert res.status_code == 404
+        body = res.get_json()
+        assert body["reason"] == "all_closed"
+        assert "closed" in body["error"].lower()
+
+    def test_all_full_returns_specific_reason(self, client, cur):
+        """When every restroom is full but open, reason='all_full'."""
+        cur.queue_fetchone({"lat": 32.9, "lng": -97.0, "zone": "secure"})
+        cur.queue_fetchall([])
+        cur.queue_fetchall([
+            {"status": "open", "occupancy": "full"},
+            {"status": "busy", "occupancy": "full"},
+        ])
+        res = client.get("/api/route-to-amenity?from_node=1&amenity_type=restroom")
+        assert res.status_code == 404
+        body = res.get_json()
+        assert body["reason"] == "all_full"
+        assert "full" in body["error"].lower()
+
+    def test_unreachable_when_dijkstra_fails(self, client, cur):
+        """Candidates exist but pgr_dijkstra cuts them off → reason='unreachable'."""
+        cur.queue_fetchone({"lat": 32.9, "lng": -97.0, "zone": "secure"})
+        cur.queue_fetchall([self._candidate()])
+        # Dijkstra returns nothing for both queries — unreachable.
+        cur.queue_fetchall([])
+        cur.queue_fetchall([])
+        res = client.get("/api/route-to-amenity?from_node=1&amenity_type=food")
+        assert res.status_code == 404
+        body = res.get_json()
+        assert body["reason"] == "unreachable"
+
+    @pytest.mark.parametrize("status,routable", [
+        ("open", True),
+        ("busy", True),
+        ("closed", False),
+        ("maintenance", False),
+        ("out_of_service", False),
+    ])
+    def test_status_filter_for_each_dropdown_value(self, client, cur, status, routable):
+        """Each admin dropdown value flows through the status filter as expected.
+
+        open/busy survive `a.status IN ('open', 'busy')` and reach the
+        dijkstra path. closed/maintenance/out_of_service get filtered out at
+        the SQL level so the user never routes to them.
+        """
+        cur.queue_fetchone({"lat": 32.9, "lng": -97.0, "zone": "secure"})
+        if routable:
+            cur.queue_fetchall([self._candidate(status=status)])
+            cur.queue_fetchall([{"node": 1}, {"node": 42}])
+            cur.queue_fetchall(self._dijkstra_rows())
+            res = client.get("/api/route-to-amenity?from_node=1&amenity_type=food")
+            assert res.status_code == 200, f"status={status!r} should be routable"
+        else:
+            # The candidate query returns empty (filtered out by status), so
+            # the unfiltered classification query runs next — return that
+            # single row so we can verify the reason.
+            cur.queue_fetchall([])
+            cur.queue_fetchall([{"status": status, "occupancy": None}])
+            res = client.get("/api/route-to-amenity?from_node=1&amenity_type=food")
+            assert res.status_code == 404, f"status={status!r} should be filtered"
+
+    def test_classify_picks_specific_reason_per_status(self, client, cur):
+        """All-maintenance and all-OOS get their own reasons, not 'all_closed'."""
+        # All maintenance.
+        cur.queue_fetchone({"lat": 32.9, "lng": -97.0, "zone": "secure"})
+        cur.queue_fetchall([])
+        cur.queue_fetchall([
+            {"status": "maintenance", "occupancy": None},
+            {"status": "maintenance", "occupancy": None},
+        ])
+        res = client.get("/api/route-to-amenity?from_node=1&amenity_type=restroom")
+        assert res.get_json()["reason"] == "all_maintenance"
+
+        cur.reset()
+        # All out_of_service.
+        cur.queue_fetchone({"lat": 32.9, "lng": -97.0, "zone": "secure"})
+        cur.queue_fetchall([])
+        cur.queue_fetchall([
+            {"status": "out_of_service", "occupancy": None},
+            {"status": "out_of_service", "occupancy": None},
+        ])
+        res = client.get("/api/route-to-amenity?from_node=1&amenity_type=restroom")
+        assert res.get_json()["reason"] == "all_out_of_service"
+
+        cur.reset()
+        # Mixed unavailable status flavors → all_unavailable_status.
+        cur.queue_fetchone({"lat": 32.9, "lng": -97.0, "zone": "secure"})
+        cur.queue_fetchall([])
+        cur.queue_fetchall([
+            {"status": "closed", "occupancy": None},
+            {"status": "maintenance", "occupancy": None},
+            {"status": "out_of_service", "occupancy": None},
+        ])
+        res = client.get("/api/route-to-amenity?from_node=1&amenity_type=restroom")
+        assert res.get_json()["reason"] == "all_unavailable_status"
 
 
 class TestAdminEndpoints:
@@ -387,6 +497,26 @@ class TestAdminEndpoints:
             json={"status": "on_fire"},
         )
         assert res.status_code == 400
+
+    @pytest.mark.parametrize("status", [
+        "open", "busy", "closed", "maintenance", "out_of_service",
+    ])
+    def test_each_dropdown_value_persists(self, client, cur, status):
+        """Every value the admin dropdown can emit must round-trip cleanly.
+
+        The admin select renders STATUS_OPTIONS verbatim. If any of those five
+        ever gets rejected by the backend, the dropdown silently breaks for
+        that one option — easy to miss because the others keep working. This
+        test pins all five.
+        """
+        cur.queue_fetchone({
+            "id": 5, "name": "D5 Restroom", "type": "restroom",
+            "status": status, "occupancy": "low", "crowdlevel": 10,
+            "lastupdated": "2026-04-18T11:00:00+00:00",
+        })
+        res = client.post("/api/admin/amenity/5/status", json={"status": status})
+        assert res.status_code == 200, f"status={status!r} was rejected: {res.data!r}"
+        assert res.get_json()["status"] == status
 
     def test_set_occupancy_full_happy_path(self, client, cur):
         """Admin 'Mark full' locks all stalls and sets the amenity bucket."""
