@@ -17,10 +17,13 @@ const val OFF_PATH_THRESHOLD_METERS = 15.0
 const val OFF_PATH_NUDGE_MIN_METERS = 5.0
 const val OFF_PATH_NUDGE_MAX_METERS = 10.0
 
-// Amenity polling cadence. Faster while the user is navigating so the
-// "destination just filled up / closed" prompt is demo-responsive.
-const val AMENITY_POLL_INTERVAL_IDLE_MS = 15_000L
-const val AMENITY_POLL_INTERVAL_NAV_MS = 5_000L
+// Amenity polling cadence. Tuned tight (2–3 s) so admin portal changes —
+// "Close all visible", occupancy flips, status edits — show up on the
+// phone within a couple seconds. Bumping these higher trades demo
+// responsiveness for fewer backend hits.
+const val AMENITY_POLL_INTERVAL_IDLE_MS = 3_000L
+const val AMENITY_POLL_INTERVAL_NAV_MS = 2_000L
+const val AMENITY_POLL_INTERVAL_RETRY_MS = 2_000L
 
 // Statuses an admin can set that mean "don't route here."
 internal val AMENITY_UNROUTABLE_STATUSES = setOf("closed", "maintenance", "out_of_service")
@@ -97,6 +100,11 @@ data class NavigationState(
     val pendingOccupancyWarning: Amenity? = null,   // route-start warning (UC5 specific-pin)
     val pendingClosedAmenity: Amenity? = null,      // route-start warning when pin is closed/maintenance (UC7)
     val pendingReroutePrompt: ReroutePrompt? = null, // mid-route full / closed (UC5 + UC7)
+    // Wall-clock millis of the most recent successful /api/amenities response.
+    // Surfaced in the bottom-card diagnostic so the user can see *at a glance*
+    // whether polling is actually firing — "0 sec ago" = healthy, "stuck on
+    // 30s ago" = the loop died and admin changes won't reflect.
+    val lastAmenityPollMs: Long? = null,
 )
 
 fun filteredAmenities(state: NavigationState): List<Amenity> = state.amenities.filter { a ->
@@ -153,35 +161,87 @@ class NavigationViewModel : ViewModel() {
         startAmenityPollingIfNeeded()
     }
 
+    /**
+     * Manual one-shot refresh hook for the on-screen "Retry" button. Forces
+     * a fresh /api/amenity-types + /api/amenities fetch outside the polling
+     * loop's cadence so the user can recover instantly when the backend
+     * comes back up. Also resurrects the polling coroutine if it's died —
+     * worst case a tap on Refresh fully restores polling within one fetch.
+     */
+    fun refreshAmenitiesNow() {
+        startAmenityPollingIfNeeded()
+        viewModelScope.launch {
+            try {
+                if (_state.value.amenityTypes.isEmpty()) {
+                    val typesResp = api.getAmenityTypes()
+                    _state.value = _state.value.copy(amenityTypes = typesResp.amenity_types)
+                }
+                val response = api.getAmenities()
+                Log.d("AmenityPoll", "refreshAmenitiesNow fetched ${response.amenities.size} amenities")
+                onAmenitiesRefreshed(response.amenities)
+                _state.value = _state.value.copy(error = null)
+            } catch (e: Exception) {
+                Log.w("AmenityPoll", "refreshAmenitiesNow failed: ${e.message}")
+                _state.value = _state.value.copy(
+                    error = "Refresh failed: ${e.message}"
+                )
+            }
+        }
+    }
+
     private fun startAmenityPollingIfNeeded() {
         if (pollingJob?.isActive == true) return
         pollingJob = viewModelScope.launch {
-            while (true) {
-                try {
-                    val response = api.getAmenities()
-                    // Itemise unroutable amenities by name so we can tell from
-                    // logcat exactly what the admin portal flipped — the old
-                    // "sample restroom" log only showed the first restroom in
-                    // the response, which hid every other status change.
-                    val closedNames = response.amenities
-                        .filter { it.status.lowercase() in AMENITY_UNROUTABLE_STATUSES }
-                        .joinToString(", ") { "${it.name}(${it.status})" }
-                        .ifEmpty { "none" }
-                    val statusCounts = response.amenities
-                        .groupingBy { it.status.lowercase() }
-                        .eachCount()
-                    Log.d(
-                        "AmenityPoll",
-                        "got ${response.amenities.size} amenities; " +
-                            "statusCounts=$statusCounts; closed=$closedNames"
-                    )
-                    onAmenitiesRefreshed(response.amenities)
-                } catch (e: Exception) {
-                    Log.w("AmenityPoll", "fetch failed: ${e.message}")
+            Log.d("AmenityPoll", "polling started")
+            try {
+                while (true) {
+                    var thisFetchOk = false
+                    try {
+                        if (_state.value.amenityTypes.isEmpty()) {
+                            try {
+                                val typesResp = api.getAmenityTypes()
+                                _state.value = _state.value.copy(amenityTypes = typesResp.amenity_types)
+                            } catch (_: Exception) {
+                                // swallow — we'll retry on the next poll tick.
+                            }
+                        }
+                        val response = api.getAmenities()
+                        val closedNames = response.amenities
+                            .filter { it.status.lowercase() in AMENITY_UNROUTABLE_STATUSES }
+                            .joinToString(", ") { "${it.name}(${it.status})" }
+                            .ifEmpty { "none" }
+                        val statusCounts = response.amenities
+                            .groupingBy { it.status.lowercase() }
+                            .eachCount()
+                        Log.d(
+                            "AmenityPoll",
+                            "tick: ${response.amenities.size} amenities; " +
+                                "statusCounts=$statusCounts; closed=$closedNames; " +
+                                "currentZone=${_state.value.currentZone}; " +
+                                "destId=${_state.value.destinationAmenityId}"
+                        )
+                        onAmenitiesRefreshed(response.amenities)
+                        thisFetchOk = true
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        // Cooperative cancellation — bubble up so we exit cleanly
+                        // when the ViewModel is cleared.
+                        throw e
+                    } catch (t: Throwable) {
+                        // Catch *Throwable* not Exception so an OutOfMemoryError
+                        // or any unchecked Error from Gson / OkHttp doesn't kill
+                        // the loop and silently stop polling. Loop continues.
+                        Log.w("AmenityPoll", "fetch failed: ${t::class.simpleName}: ${t.message}")
+                    }
+                    val interval = when {
+                        !thisFetchOk || _state.value.amenities.isEmpty() ->
+                            AMENITY_POLL_INTERVAL_RETRY_MS
+                        _state.value.isNavigating -> AMENITY_POLL_INTERVAL_NAV_MS
+                        else -> AMENITY_POLL_INTERVAL_IDLE_MS
+                    }
+                    delay(interval)
                 }
-                val interval = if (_state.value.isNavigating)
-                    AMENITY_POLL_INTERVAL_NAV_MS else AMENITY_POLL_INTERVAL_IDLE_MS
-                delay(interval)
+            } finally {
+                Log.w("AmenityPoll", "polling coroutine exiting")
             }
         }
     }
@@ -196,10 +256,26 @@ class NavigationViewModel : ViewModel() {
         val destId = prev.destinationAmenityId
         val destAmenity = if (destId != null) fresh.firstOrNull { it.id == destId } else null
 
+        // A successful poll proves the backend is reachable, so clear any
+        // stale connectivity-error banner ("Refresh failed", "Can't reach the
+        // backend", "Failed to load amenity types"). Routing-specific errors
+        // ("No restroom reachable", "is closed right now") are user-action
+        // results and stay until the next user action overwrites them.
+        val staleConnectivityError = prev.error?.let { msg ->
+            msg.startsWith("Refresh failed") ||
+                msg.startsWith("Can't reach the backend") ||
+                msg.startsWith("Failed to load amenity types") ||
+                msg.startsWith("Failed to get random")
+        } ?: false
+
         var newPrompt: ReroutePrompt? = prev.pendingReroutePrompt
-        // Only fire a new prompt while actively navigating and if we're not
-        // already prompting. Once the user accepts or declines, we reset.
-        if (destAmenity != null && prev.isNavigating && newPrompt == null) {
+        // Fire a reroute prompt while *either* actively navigating or paused
+        // (isNavigating stays true through pause), and only when there isn't
+        // one already on screen. Loosened from "isNavigating only" so a poll
+        // landing during a pause still raises the alert — that was the
+        // demo-day case the user hit.
+        val canPrompt = prev.isNavigating || prev.isSimulationPaused
+        if (destAmenity != null && canPrompt && newPrompt == null) {
             val nowFull = destAmenity.occupancy == "full"
             val wasFull = prev.lastKnownDestinationOccupancy == "full"
             val nowClosed = destAmenity.status in AMENITY_UNROUTABLE_STATUSES
@@ -218,12 +294,23 @@ class NavigationViewModel : ViewModel() {
                 else -> null
             }
         }
+        // Diagnostic log so it's obvious in logcat (filter by tag
+        // "RerouteCheck") why a prompt did or didn't fire on a given poll.
+        Log.d(
+            "RerouteCheck",
+            "destId=$destId hasDestAmenity=${destAmenity != null} " +
+                "isNavigating=${prev.isNavigating} isPaused=${prev.isSimulationPaused} " +
+                "destStatus=${destAmenity?.status} prevKnownStatus=${prev.lastKnownDestinationStatus} " +
+                "newPrompt=${newPrompt?.reason}"
+        )
 
         _state.value = prev.copy(
             amenities = fresh,
             lastKnownDestinationStatus = destAmenity?.status ?: prev.lastKnownDestinationStatus,
             lastKnownDestinationOccupancy = destAmenity?.occupancy ?: prev.lastKnownDestinationOccupancy,
-            pendingReroutePrompt = newPrompt
+            pendingReroutePrompt = newPrompt,
+            error = if (staleConnectivityError) null else prev.error,
+            lastAmenityPollMs = System.currentTimeMillis(),
         )
     }
 
@@ -321,6 +408,17 @@ class NavigationViewModel : ViewModel() {
 
     fun dismissOccupancyWarning() {
         _state.value = _state.value.copy(pendingOccupancyWarning = null)
+    }
+
+    /**
+     * User picked a high/full pin but wants the next-best alternative. Hand
+     * off to /api/route-to-amenity which now prefers empty/low/medium over
+     * high, so the user lands on the best routable option of the same type.
+     */
+    fun findBetterFromOccupancyWarning() {
+        val amenity = _state.value.pendingOccupancyWarning ?: return
+        _state.value = _state.value.copy(pendingOccupancyWarning = null)
+        routeToAmenity(amenity.type)
     }
 
     /** User accepted "find next-nearest open" from the closed-amenity warning. */
@@ -766,6 +864,30 @@ class NavigationViewModel : ViewModel() {
                     currentZone = node.zone,
                     currentInstruction = "Ready — pick a destination",
                 )
+
+                // Force an immediate /api/amenities pull so markers appear the
+                // moment the user picks a zone. Always run this (no "is empty"
+                // guard) — refreshing right when the user signals "I'm ready
+                // to pick a destination" is cheap and removes the timing
+                // window where polling hasn't caught up yet.
+                try {
+                    if (_state.value.amenityTypes.isEmpty()) {
+                        val typesResp = api.getAmenityTypes()
+                        _state.value = _state.value.copy(amenityTypes = typesResp.amenity_types)
+                    }
+                    val response = api.getAmenities()
+                    Log.d("AmenityPoll", "setMockStart fetched ${response.amenities.size} amenities (zone=${node.zone})")
+                    onAmenitiesRefreshed(response.amenities)
+                } catch (e: Exception) {
+                    Log.w("AmenityPoll", "setMockStart immediate fetch failed: ${e.message}")
+                    // Polling loop will keep retrying; surface a hint so the
+                    // user understands why the map is empty.
+                    if (_state.value.amenities.isEmpty()) {
+                        _state.value = _state.value.copy(
+                            error = "Can't reach the backend — markers will load when it's available."
+                        )
+                    }
+                }
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
                     error = "Failed to get random $zone start: ${e.message}"

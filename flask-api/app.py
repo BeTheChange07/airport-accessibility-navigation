@@ -5,6 +5,7 @@ import math
 import socket
 import functools
 import secrets
+import threading
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from flask import (
@@ -36,6 +37,20 @@ DB_CONFIG = {
 databaseConnection = psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor)
 cur = databaseConnection.cursor()
 
+# Werkzeug runs each request on its own thread (we keep threaded=True so
+# Werkzeug stays in HTTP/1.1 mode — HTTP/1.0 + Connection:close, which is
+# what threaded=False gives, was the cause of OkHttp's "unexpected end of
+# stream" / mid-JSON parse errors on the Android client). With threaded
+# requests, the global `cur` cursor is shared across them, and psycopg2
+# cursors are explicitly NOT thread-safe — interleaved use corrupts the
+# response stream.
+#
+# Wrap every Flask request in this lock via a before_request hook so all DB
+# work for one request runs without interruption from any other request's
+# cursor activity. Acquired in _ensure_db_alive (which runs first in the
+# before_request chain) and released in a teardown handler.
+_db_lock = threading.RLock()
+
 def exitHandler():
     cur.close()
     databaseConnection.close()
@@ -63,17 +78,18 @@ def _reopen_db_connection():
 
 @app.before_request
 def _ensure_db_alive():
-    """Probe the DB connection before every request; reconnect if dead.
+    """Acquire the DB lock + probe the connection before every request.
 
-    The original code opened a single global connection at import time and
-    never reopened it, so an RDS idle-timeout disconnect (or any transient
-    network failure) would leave every subsequent request 500'ing with
-    `psycopg2.InterfaceError: connection already closed` until Flask was
-    restarted. The probe is a `SELECT 1` on a short-lived cursor — cheap
-    enough to run on every request, and it both detects a closed connection
-    and clears any "current transaction is aborted" state from a prior
-    failed query.
+    Two responsibilities folded together because they both *must* run before
+    any handler touches `cur`:
+
+    1. Acquire `_db_lock` so the request gets exclusive access to the
+       module-global `cur`. Released in `_release_db_lock` teardown handler.
+    2. Probe the connection (`SELECT 1`) and reconnect if dead — RDS idle
+       timeouts and transient network blips otherwise leave every later
+       request 500'ing.
     """
+    _db_lock.acquire()
     global databaseConnection
     try:
         if databaseConnection.closed != 0:
@@ -91,6 +107,17 @@ def _ensure_db_alive():
             databaseConnection.rollback()
         except Exception:
             _reopen_db_connection()
+
+
+@app.teardown_request
+def _release_db_lock(_exc):
+    """Release the DB lock at the end of every request, success or failure."""
+    try:
+        _db_lock.release()
+    except RuntimeError:
+        # _ensure_db_alive may not have run (e.g., 404 before before_request
+        # chain completes). RuntimeError = lock not held; safe to ignore.
+        pass
 
 def calculate_bearing(lat1, lng1, lat2, lng2):
     """Calculate bearing in degrees from north between two lat/lng points."""
@@ -218,23 +245,92 @@ def health():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-def routeHelperFunctionInQueryDijkstraReplacement(fromNode: int, toNode: int) -> list[dict[str, Any]]:
+def routeHelperFunctionInQueryDijkstraReplacement(
+    fromNode: int,
+    toNode: int,
+    zone: str | None = None,
+) -> list[dict[str, Any]]:
     # TODO: replace pgr_dijkstra with A*.
     # UC8: skip edges and nodes the admin has marked closed. The inner SQL
     # is the literal string pgr_dijkstra runs as its graph definition --
     # joining nav_edges to nav_nodes on both endpoints lets us drop edges
     # whose source / target was painted closed. COALESCE(.., false) keeps
     # this safe against rows that pre-date the iteration_3 migration.
+    #
+    # When `zone` is provided ('secure' or 'public'), confine the graph to
+    # that zone — both endpoints of every traversable edge must live in it.
+    # Without this, Dijkstra happily routes a secure-side user through the
+    # public side and back if that's the shortest hop graph-wise, which
+    # corresponds to walking back through TSA. We embed the zone as a SQL
+    # literal because it's validated by callers (only 'secure' / 'public'
+    # ever reach here).
+    if zone not in (None, 'secure', 'public'):
+        raise ValueError(f"unexpected zone {zone!r}")
+    # When zone is set, prefer (don't require) staying in that zone:
+    # add a 1,000,000-unit penalty to any edge whose endpoints aren't both
+    # derived as the requested zone. Real distances are tens of metres, so
+    # Dijkstra will pick any same-zone path over a cross-zone shortcut, but
+    # if the *only* path requires leaving the zone (e.g. a bathroom whose
+    # graph neighbours are all derived 'public'), the route still works
+    # rather than 404'ing. Strict filtering broke ~7 / 11 male-bathroom
+    # destinations because their reachable subgraph crossed the boundary.
+    #
+    # The CTE re-derives each node's zone from neighbour majority, matching
+    # AMENITY_DERIVED_ZONE_EXPR — stored `n.zone` is unreliable on ~59
+    # linker nodes.
+    if zone is None:
+        graph_sql = (
+            "SELECT e.id, e.from_node AS source, e.to_node AS target, "
+            "e.distance AS cost, e.distance AS reverse_cost "
+            "FROM nav_edges e "
+            "JOIN nav_nodes nf ON nf.id = e.from_node "
+            "JOIN nav_nodes nt ON nt.id = e.to_node "
+            "WHERE COALESCE(e.is_closed, false) = false "
+            "AND COALESCE(nf.is_closed, false) = false "
+            "AND COALESCE(nt.is_closed, false) = false"
+        )
+    else:
+        graph_sql = (
+            "WITH derived AS ("
+            "  SELECT n.id, "
+            "         CASE "
+            "           WHEN COALESCE(nbr.secure_n,0) > COALESCE(nbr.public_n,0) THEN 'secure' "
+            "           WHEN COALESCE(nbr.public_n,0) > COALESCE(nbr.secure_n,0) THEN 'public' "
+            "           ELSE n.zone "
+            "         END AS dz "
+            "  FROM nav_nodes n "
+            "  LEFT JOIN LATERAL ("
+            "    SELECT SUM(CASE WHEN n2.zone = 'secure' THEN 1 ELSE 0 END) AS secure_n, "
+            "           SUM(CASE WHEN n2.zone = 'public' THEN 1 ELSE 0 END) AS public_n "
+            "    FROM nav_edges ee "
+            "    JOIN nav_nodes n2 ON n2.id = CASE WHEN ee.from_node = n.id THEN ee.to_node ELSE ee.from_node END "
+            "    WHERE ee.from_node = n.id OR ee.to_node = n.id"
+            "  ) nbr ON TRUE"
+            ") "
+            "SELECT e.id, e.from_node AS source, e.to_node AS target, "
+            "  e.distance + CASE WHEN dnf.dz <> '{z}' OR dnt.dz <> '{z}' "
+            "                    THEN 1000000 ELSE 0 END AS cost, "
+            "  e.distance + CASE WHEN dnf.dz <> '{z}' OR dnt.dz <> '{z}' "
+            "                    THEN 1000000 ELSE 0 END AS reverse_cost "
+            "FROM nav_edges e "
+            "JOIN nav_nodes nf ON nf.id = e.from_node "
+            "JOIN nav_nodes nt ON nt.id = e.to_node "
+            "JOIN derived dnf ON dnf.id = e.from_node "
+            "JOIN derived dnt ON dnt.id = e.to_node "
+            "WHERE COALESCE(e.is_closed, false) = false "
+            "AND COALESCE(nf.is_closed, false) = false "
+            "AND COALESCE(nt.is_closed, false) = false"
+        ).format(z=zone)
     cur.execute("""
         SELECT
             r.node
         FROM pgr_dijkstra(
-            'SELECT e.id, e.from_node AS source, e.to_node AS target, e.distance AS cost, e.distance AS reverse_cost FROM nav_edges e JOIN nav_nodes nf ON nf.id = e.from_node JOIN nav_nodes nt ON nt.id = e.to_node WHERE COALESCE(e.is_closed, false) = false AND COALESCE(nf.is_closed, false) = false AND COALESCE(nt.is_closed, false) = false',
+            %s,
             %s, %s,
             directed => false
         ) AS r
         ORDER BY r.seq
-    """, (fromNode, toNode))
+    """, (graph_sql, fromNode, toNode))
     node_ids = [row['node'] for row in cur.fetchall()]
 
     cur.execute("""
@@ -291,7 +387,16 @@ def get_route():
         return jsonify({'error': 'from_node and to_node are required'}), 400
 
     try:
-        rows = routeHelperFunctionInQueryDijkstraReplacement(from_node, to_node)
+        # Confine the path to the start node's zone so a secure-side route
+        # doesn't get routed back through TSA into public and back.
+        cur.execute("SELECT zone FROM nav_nodes WHERE id = %s", (from_node,))
+        start_row = cur.fetchone()
+        start_zone = (start_row['zone'] if start_row else None) or None
+        if start_zone not in ('secure', 'public'):
+            start_zone = None
+        rows = routeHelperFunctionInQueryDijkstraReplacement(
+            from_node, to_node, zone=start_zone,
+        )
 
         if not rows:
             return jsonify({'error': 'No route found'}), 404
@@ -519,7 +624,7 @@ def get_amenities():
             FROM amenities a
             LEFT JOIN nav_nodes n ON n.id = a.nodeid
             {AMENITY_DERIVED_ZONE_JOIN}
-            ORDER BY a.type, a.name
+            ORDER BY a.type, a.name, a.id
         """)
         amenities = c.fetchall()
         c.close()
@@ -721,10 +826,25 @@ def route_to_amenity():
                 'accessible': accessible,
             }), 404
 
-        # Sort by straight-line distance using the linked nav_node coords
-        # so we stay in the same frame as routing.
-        candidates.sort(key=lambda c: haversine_distance_meters(
-            start['lat'], start['lng'], c['node_lat'], c['node_lng']
+        # Sort by occupancy preference first, then straight-line distance.
+        # Empty/low/null (non-tracked types) tie for best, medium next, high
+        # last — full was already excluded by routable_occupancy_filter. So
+        # "Route to nearest" picks the closest *good* option, falling back
+        # to high only when nothing better is reachable.
+        def _occupancy_rank(occ):
+            o = (occ or '').lower()
+            if o in ('full',):    # excluded earlier; defensive
+                return 3
+            if o == 'high':
+                return 2
+            if o == 'medium':
+                return 1
+            return 0  # empty / low / null
+        candidates.sort(key=lambda c: (
+            _occupancy_rank(c.get('occupancy')),
+            haversine_distance_meters(
+                start['lat'], start['lng'], c['node_lat'], c['node_lng']
+            ),
         ))
 
         # Try each candidate until one is routable.
@@ -734,7 +854,9 @@ def route_to_amenity():
         for candidate in candidates:
             target_node_id = candidate['nodeid']
             try:
-                result = routeHelperFunctionInQueryDijkstraReplacement(from_node, target_node_id)
+                result = routeHelperFunctionInQueryDijkstraReplacement(
+                    from_node, target_node_id, zone=start_zone,
+                )
                 if result:
                     rows = result
                     nearest = candidate
@@ -1561,4 +1683,12 @@ if __name__ == '__main__':
         banner_lines.append("=" * 60)
         banner_lines.append("")
         print("\n".join(banner_lines), flush=True)
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Serve via waitress instead of Werkzeug's dev server. The Werkzeug
+    # threaded server truncates large concurrent responses mid-write — the
+    # Android client saw it as "unexpected end of stream" / malformed JSON
+    # at consistent byte positions in /api/amenities. waitress is a
+    # production-grade pure-Python WSGI server that handles concurrent
+    # requests cleanly on Windows; the `_db_lock` rwlock still serialises
+    # cursor access on top of it.
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=5000, threads=8)

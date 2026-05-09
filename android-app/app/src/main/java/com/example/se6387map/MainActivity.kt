@@ -175,52 +175,34 @@ fun NavigationScreen(
                     color = Color(0xFF4285F4),
                     width = 12f
                 )
-
-                // End marker. Uses rose/pink so it doesn't collide with the
-                // "full restroom = red" amenity-marker color — otherwise an
-                // empty destination restroom looks like it's full.
-                val endMarkerState = rememberMarkerState(
-                    position = state.routePoints.last()
-                )
-                Marker(
-                    state = endMarkerState,
-                    title = state.destinationName ?: "Destination",
-                    snippet = "Destination",
-                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_ROSE)
-                )
             }
 
-            // Amenity markers (filtered)
+            // Amenity markers (filtered). Closed/maintenance/OOS pins use a
+            // red "no-entry" disc bitmap. The descriptor is built fresh per
+            // marker via `remember(amenity.id)` instead of one shared
+            // descriptor — that prevents the previous bug where Maps SDK
+            // disposed the shared bitmap on first recycle and every other
+            // closed marker disappeared. Each marker now owns its own
+            // bitmap; one's disposal can't affect the others.
             val visibleAmenities = filteredAmenities(state)
-            // Build the closed-amenity bitmap once per composition; reuse
-            // across every unroutable pin instead of paying the canvas cost
-            // per marker per recomposition.
-            val closedIcon = remember { buildClosedAmenityIcon() }
             visibleAmenities.forEach { amenity ->
-                // Include status + occupancy in the key so the marker is
-                // recreated (not just recomposed) when those change. Works
-                // around a maps-compose quirk where icon changes on an
-                // already-placed marker don't always reach the native map.
                 key(amenity.id, amenity.status, amenity.occupancy) {
                     val hue = amenityMarkerHue(amenity)
                     val pos = LatLng(amenity.latitude, amenity.longitude)
                     val markerState = rememberMarkerState(position = pos)
-                    // Force-sync position so filtering doesn't leave a stale LatLng.
                     markerState.position = pos
                     val isUnroutable = amenity.status.lowercase() in AMENITY_UNROUTABLE_STATUSES
+                    val markerIcon = remember(amenity.id, amenity.status) {
+                        if (isUnroutable) buildClosedAmenityIcon()
+                        else BitmapDescriptorFactory.defaultMarker(hue)
+                    }
                     Marker(
                         state = markerState,
-                        // Prefix the title so it's obvious in the info window
-                        // and on accessibility readouts that the pin isn't a
-                        // normal destination.
                         title = if (isUnroutable)
-                            "[${amenity.status.uppercase()}] ${amenity.name}"
-                        else amenity.name,
+                            "[${amenity.status.uppercase()}] #${amenity.id} ${amenity.name}"
+                        else "#${amenity.id} ${amenity.name}",
                         snippet = amenityMarkerSnippet(amenity),
-                        // Closed pins get an unmistakable red "no-entry" badge.
-                        // Open pins keep the existing hue gradient.
-                        icon = if (isUnroutable) closedIcon
-                            else BitmapDescriptorFactory.defaultMarker(hue),
+                        icon = markerIcon,
                         onClick = {
                             viewModel.selectAmenity(amenity)
                             true
@@ -394,13 +376,21 @@ fun NavigationScreen(
                 title = { Text("Destination is busy") },
                 text = {
                     Text(
-                        "$headline You can still route to ${amenity.name}, but " +
-                            "the next-nearest restroom may be a better option. Route anyway?"
+                        "$headline You can route to ${amenity.name} anyway, " +
+                            "or jump to the closest empty / low / medium one nearby."
                     )
                 },
+                // Two primary actions ("Find better" + "Route anyway") plus
+                // a Cancel. AlertDialog only has confirm + dismiss slots, so
+                // the two primaries share the confirm slot via a Row.
                 confirmButton = {
-                    TextButton(onClick = { viewModel.confirmOccupancyWarning() }) {
-                        Text("Route anyway")
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(onClick = { viewModel.findBetterFromOccupancyWarning() }) {
+                            Text("Find better")
+                        }
+                        TextButton(onClick = { viewModel.confirmOccupancyWarning() }) {
+                            Text("Route anyway")
+                        }
                     }
                 },
                 dismissButton = {
@@ -575,8 +565,73 @@ fun NavigationScreen(
                         text = "Terminal D Navigation",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 12.dp)
+                        modifier = Modifier.padding(bottom = 4.dp)
                     )
+
+                    // Diagnostic row: tells the user whether amenities are
+                    // loaded. Doubles as a manual recovery hook for the
+                    // "started app before backend" case — tapping Retry forces
+                    // an immediate refresh outside the polling cadence.
+                    if (state.amenities.isEmpty()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Amenities loading…",
+                                color = Color.Gray,
+                                fontSize = 12.sp
+                            )
+                            TextButton(onClick = { viewModel.refreshAmenitiesNow() }) {
+                                Text("Retry", fontSize = 12.sp)
+                            }
+                        }
+                    } else {
+                        // Live timestamp so it's obvious when polling stalls —
+                        // a frozen "30 sec ago" is the smoking gun for "the
+                        // poll loop died and admin changes aren't reflecting."
+                        // Recompose every second so the relative time ticks.
+                        var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+                        LaunchedEffect(Unit) {
+                            while (true) {
+                                kotlinx.coroutines.delay(1000)
+                                nowMs = System.currentTimeMillis()
+                            }
+                        }
+                        val lastPoll = state.lastAmenityPollMs
+                        val ageLabel = when {
+                            lastPoll == null -> "—"
+                            else -> {
+                                val seconds = ((nowMs - lastPoll) / 1000).coerceAtLeast(0)
+                                when {
+                                    seconds < 5 -> "just now"
+                                    seconds < 60 -> "${seconds}s ago"
+                                    else -> "${seconds / 60}m ago"
+                                }
+                            }
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "${state.amenities.size} amenities · last poll $ageLabel",
+                                color = Color.Gray,
+                                fontSize = 11.sp
+                            )
+                            TextButton(
+                                onClick = { viewModel.refreshAmenitiesNow() },
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                            ) {
+                                Text("Refresh", fontSize = 11.sp)
+                            }
+                        }
+                    }
 
                     if (state.currentZone != null) {
                         FiltersSection(
@@ -590,61 +645,63 @@ fun NavigationScreen(
                         )
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        // Amenity type dropdown (filters the map to a single type)
-                        if (state.amenityTypes.isNotEmpty()) {
-                            AmenityDropdown(
-                                amenityTypes = state.amenityTypes,
-                                selected = state.dropdownTypeFilter,
-                                onSelect = { viewModel.setDropdownTypeFilter(it) },
-                                onClear = { viewModel.setDropdownTypeFilter(null) }
-                            )
+                        // Amenity type dropdown (filters the map to a single type).
+                        // Render unconditionally so the layout doesn't jump while
+                        // /api/amenity-types is still loading on first boot — the
+                        // dropdown shows "Loading..." with no menu items until the
+                        // fetch lands, then populates in place.
+                        AmenityDropdown(
+                            amenityTypes = state.amenityTypes,
+                            selected = state.dropdownTypeFilter,
+                            onSelect = { viewModel.setDropdownTypeFilter(it) },
+                            onClear = { viewModel.setDropdownTypeFilter(null) }
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // Restroom gender sub-filter
+                        if (state.dropdownTypeFilter == "restroom") {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                FilterChip(
+                                    selected = state.restroomGenderFilter == RestroomGender.ANY,
+                                    onClick = { viewModel.setRestroomGender(RestroomGender.ANY) },
+                                    label = { Text("Any") }
+                                )
+                                FilterChip(
+                                    selected = state.restroomGenderFilter == RestroomGender.MALE,
+                                    onClick = { viewModel.setRestroomGender(RestroomGender.MALE) },
+                                    label = { Text("Male") }
+                                )
+                                FilterChip(
+                                    selected = state.restroomGenderFilter == RestroomGender.FEMALE,
+                                    onClick = { viewModel.setRestroomGender(RestroomGender.FEMALE) },
+                                    label = { Text("Female") }
+                                )
+                            }
                             Spacer(modifier = Modifier.height(8.dp))
+                        }
 
-                            // Restroom gender sub-filter
-                            if (state.dropdownTypeFilter == "restroom") {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    FilterChip(
-                                        selected = state.restroomGenderFilter == RestroomGender.ANY,
-                                        onClick = { viewModel.setRestroomGender(RestroomGender.ANY) },
-                                        label = { Text("Any") }
-                                    )
-                                    FilterChip(
-                                        selected = state.restroomGenderFilter == RestroomGender.MALE,
-                                        onClick = { viewModel.setRestroomGender(RestroomGender.MALE) },
-                                        label = { Text("Male") }
-                                    )
-                                    FilterChip(
-                                        selected = state.restroomGenderFilter == RestroomGender.FEMALE,
-                                        onClick = { viewModel.setRestroomGender(RestroomGender.FEMALE) },
-                                        label = { Text("Female") }
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(8.dp))
+                        // Route-to-nearest button (only when a type is selected)
+                        if (state.dropdownTypeFilter != null) {
+                            Button(
+                                onClick = {
+                                    val type = state.dropdownTypeFilter
+                                    if (type == "restroom" &&
+                                        state.restroomGenderFilter != RestroomGender.ANY
+                                    ) {
+                                        viewModel.routeToNearestFilteredRestroom()
+                                    } else if (type != null) {
+                                        viewModel.routeToAmenity(type)
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A73E8))
+                            ) {
+                                Text("Route to nearest", fontSize = 16.sp)
                             }
-
-                            // Route-to-nearest button (only when a type is selected)
-                            if (state.dropdownTypeFilter != null) {
-                                Button(
-                                    onClick = {
-                                        val type = state.dropdownTypeFilter
-                                        if (type == "restroom" &&
-                                            state.restroomGenderFilter != RestroomGender.ANY
-                                        ) {
-                                            viewModel.routeToNearestFilteredRestroom()
-                                        } else if (type != null) {
-                                            viewModel.routeToAmenity(type)
-                                        }
-                                    },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A73E8))
-                                ) {
-                                    Text("Route to nearest", fontSize = 16.sp)
-                                }
-                                Spacer(modifier = Modifier.height(8.dp))
-                            }
+                            Spacer(modifier = Modifier.height(8.dp))
                         }
 
                         Button(
@@ -773,17 +830,21 @@ fun AmenityDropdown(
     onClear: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
+    val isLoading = amenityTypes.isEmpty()
     val displayText = selected?.replaceFirstChar { it.uppercase() }
-        ?: "Select amenity type..."
+        ?: if (isLoading) "Loading amenity types..." else "Select amenity type..."
 
     ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { expanded = !expanded }
+        // Don't allow expansion until the type list is back from /api/amenity-types,
+        // otherwise the user opens an empty menu.
+        expanded = expanded && !isLoading,
+        onExpandedChange = { if (!isLoading) expanded = !expanded }
     ) {
         OutlinedTextField(
             value = displayText,
             onValueChange = {},
             readOnly = true,
+            enabled = !isLoading,
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
             modifier = Modifier
                 .fillMaxWidth()
@@ -1011,7 +1072,11 @@ fun AmenityDetailSheet(
         Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
             Text(amenity.name, fontSize = 22.sp, fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(4.dp))
-            Text(amenity.type.replaceFirstChar { it.uppercase() }, fontSize = 14.sp, color = Color.Gray)
+            Text(
+                "${amenity.type.replaceFirstChar { it.uppercase() }} · ID ${amenity.id}",
+                fontSize = 14.sp,
+                color = Color.Gray,
+            )
             Spacer(modifier = Modifier.height(8.dp))
             Text("Status: ${amenity.status}", fontSize = 14.sp)
             if (isRestroom) {
@@ -1107,7 +1172,11 @@ fun AmenityListSheet(
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(amenity.name, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                            Text(
+                                "#${amenity.id} ${amenity.name}",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
                             Text(
                                 "${amenity.type} · ${amenity.status}",
                                 fontSize = 12.sp,

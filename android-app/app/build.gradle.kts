@@ -12,9 +12,14 @@ val localProperties = Properties().apply {
         localFile.inputStream().use { load(it) }
     }
 }
-val apiBaseUrl: String = localProperties.getProperty("API_BASE_URL")
-    ?: (project.findProperty("API_BASE_URL") as String?)
-    ?: "http://10.0.2.2:5000/"
+// trim() to defend against a stray trailing space in local.properties — a
+// trailing whitespace inside the URL silently breaks Retrofit's baseUrl,
+// so amenity polling requests never reach the server.
+val apiBaseUrl: String = (
+    localProperties.getProperty("API_BASE_URL")
+        ?: (project.findProperty("API_BASE_URL") as String?)
+        ?: "http://10.0.2.2:5000/"
+    ).trim()
 
 // We generate a small ApiConfig.kt at configuration time instead of
 // using AGP's `buildConfigField` / `BuildConfig` class. Reason: Android

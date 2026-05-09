@@ -54,11 +54,16 @@ def tick(p_fill, p_drain, count):
     occupancy bucket from the stall states.
     """
     with conn.cursor() as cur:
+        # Skip stalls touched in the last 30s. Admin "Full" / "Empty" / etc.
+        # stamp every stall in the restroom with lastupdated=NOW(), so the
+        # admin-set bucket sticks long enough for the demo (UC5 reroute
+        # prompt, marker colour) before natural drift kicks back in.
         cur.execute("""
             SELECT u.unitid, u.amenityid, u.occupied
             FROM amenityunits u
             JOIN amenities a ON a.id = u.amenityid
             WHERE a.type = 'restroom'
+              AND u.lastupdated < NOW() - INTERVAL '30 seconds'
             ORDER BY RANDOM()
             LIMIT %s
         """, (count,))

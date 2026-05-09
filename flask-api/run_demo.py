@@ -44,22 +44,43 @@ CHILD_ENV = {**os.environ, **{k: v for k, v in _dotenv.items() if v is not None}
 PROCS: "list[tuple[str, subprocess.Popen]]" = []
 
 
-def _spawn(label: str, cwd: str, args: "list[str]") -> None:
-    """Start a child process and tee its output into our stdout with a prefix."""
+def _spawn(label: str, cwd: str, args: "list[str]", inherit_stdio: bool = False) -> None:
+    """Start a child process. Two stdio modes:
+
+    - inherit_stdio=False (default): pipe child stdout into a pump thread
+      that prefixes each line. Good for sensor mocks that log infrequently.
+    - inherit_stdio=True: child writes directly to the parent's terminal.
+      Required for Flask — Werkzeug's request logger blocks if the pipe
+      reader (PyCharm's console) gets behind, which truncates HTTP responses
+      mid-stream and corrupts /api/amenities JSON on the Android client.
+      Letting Flask write straight to stdout dodges that backpressure.
+    """
     try:
-        proc = subprocess.Popen(
-            args,
-            cwd=cwd,
-            env=CHILD_ENV,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            bufsize=1,
-            text=True,
-        )
+        if inherit_stdio:
+            proc = subprocess.Popen(
+                args,
+                cwd=cwd,
+                env=CHILD_ENV,
+                # No PIPE: child's stdout/stderr inherit parent's so writes
+                # never block on a pipe buffer that no one is draining.
+            )
+        else:
+            proc = subprocess.Popen(
+                args,
+                cwd=cwd,
+                env=CHILD_ENV,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+                text=True,
+            )
     except FileNotFoundError as e:
         print(f"[{label}] failed to start: {e}", flush=True)
         return
     PROCS.append((label, proc))
+
+    if inherit_stdio:
+        return
 
     def pump() -> None:
         assert proc.stdout is not None
@@ -169,6 +190,7 @@ def main() -> int:
         "flask",
         cwd=HERE,
         args=[python, os.path.join(HERE, "app.py")],
+        inherit_stdio=True,
     )
     _spawn(
         "uc5-occupancy",

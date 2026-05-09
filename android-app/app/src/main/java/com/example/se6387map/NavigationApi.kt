@@ -7,7 +7,12 @@ import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Query
+import okhttp3.ConnectionPool
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.Response
+import java.io.IOException
+import java.net.SocketException
 import java.util.concurrent.TimeUnit
 
 data class RouteResponse(
@@ -137,13 +142,52 @@ interface NavigationApiService {
     ): RandomNodeResponse
 }
 
+/**
+ * Wraps every GET in a single in-band retry. When the demo backend is
+ * restarted (PyCharm Run → Stop → Run), OkHttp's pooled keep-alive
+ * connections are stale: the OS already FIN'd them but OkHttp hasn't
+ * noticed, so the next request bubbles up as "unexpected end of stream"
+ * or `SocketException: Connection reset`. Retrying once gets a fresh
+ * connection from the pool's replacement and almost always succeeds.
+ *
+ * Only retries idempotent GETs and only on the specific stream/socket
+ * errors caused by stale connections — POSTs and other failures pass
+ * through untouched.
+ */
+private class StaleConnectionRetryInterceptor : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        return try {
+            chain.proceed(request)
+        } catch (e: IOException) {
+            val isStaleConnection = request.method() == "GET" && (
+                e is SocketException ||
+                    e.message?.contains("unexpected end of stream", ignoreCase = true) == true ||
+                    e.message?.contains("Connection reset", ignoreCase = true) == true ||
+                    e.message?.contains("stream was reset", ignoreCase = true) == true
+            )
+            if (isStaleConnection) chain.proceed(request) else throw e
+        }
+    }
+}
+
 object NavigationApi {
     // ApiConfig is generated from local.properties by the generateApiConfig gradle task.
     private val BASE_URL = ApiConfig.BASE_URL
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        // Don't pool keep-alive connections. Demo Flask is restarted often
+        // and the OS-side close on those pooled sockets isn't detected by
+        // OkHttp until the next request fails mid-stream. A fresh TCP
+        // handshake on localhost is sub-millisecond, so the cost is trivial
+        // and the failure mode disappears.
+        .connectionPool(ConnectionPool(0, 1, TimeUnit.NANOSECONDS))
+        .retryOnConnectionFailure(true)
+        // Belt-and-suspenders: even with no pool, very-fast restarts can
+        // race; retry GETs once on the canonical stale-connection errors.
+        .addInterceptor(StaleConnectionRetryInterceptor())
         .build()
 
     val service: NavigationApiService by lazy {

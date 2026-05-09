@@ -202,6 +202,18 @@ async function fetchAmenities() {
   render();
 }
 
+// Background poll so sensor-driven occupancy changes and other admin
+// edits show up without a manual Refresh click. Skip the tick if the
+// user has a status <select> focused — re-rendering would yank the
+// dropdown closed mid-interaction.
+const ADMIN_POLL_INTERVAL_MS = 4000;
+async function pollAmenities() {
+  const focused = document.activeElement;
+  if (focused && focused.tagName === 'SELECT') return;
+  try { await fetchAmenities(); } catch (_) { /* swallow; next tick retries */ }
+}
+setInterval(pollAmenities, ADMIN_POLL_INTERVAL_MS);
+
 function rebuildTypeFilter() {
   const select = document.getElementById('typeFilter');
   const types = Array.from(new Set(amenities.map(a => a.type))).sort();
@@ -220,7 +232,13 @@ function render() {
   const rows = amenities
     .filter(a => currentFilter === '__all__' || a.type === currentFilter)
     .filter(a => currentZone === '__all__' || a.zone === currentZone)
-    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    .sort((a, b) => {
+      const byName = (a.name || '').localeCompare(b.name || '');
+      // Stable tiebreaker — many rows share the same name (e.g., 8x
+      // "Female Bathroom"), and without this they hop around on every
+      // auto-poll, making it look like rows are reordering after edits.
+      return byName !== 0 ? byName : (a.id - b.id);
+    });
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="8" class="muted">No amenities match this filter.</td></tr>`;
     return;
